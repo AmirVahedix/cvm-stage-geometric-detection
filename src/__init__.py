@@ -9,12 +9,20 @@ from .cvm_calculator import (
     perpendicular_distance,
 )
 from .model import CephalometricSwinGCN
-from .inference import (
-    CVMPredictor,
-    PredictionResult,
-    LANDMARK_LABELS,
-    draw_landmarks_on_image,
-)
+
+
+def __getattr__(name: str):
+    if name in (
+        "CVMPredictor",
+        "PredictionResult",
+        "LANDMARK_LABELS",
+        "draw_landmarks_on_image",
+        "visualize_with_matplotlib",
+    ):
+        from . import inference
+        return getattr(inference, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "Point",
@@ -30,4 +38,5 @@ __all__ = [
     "PredictionResult",
     "LANDMARK_LABELS",
     "draw_landmarks_on_image",
+    "visualize_with_matplotlib",
 ]

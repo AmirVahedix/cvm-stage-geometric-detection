@@ -34,6 +34,15 @@ LANDMARK_LABELS = [
     "C4_AI",  # 12: Inferior-Anterior
 ]
 
+STAGE_DESCRIPTIONS = {
+    "CS1": "Lower borders of C2, C3, and C4 are flat. Bodies of C3 and C4 are trapezoidal (Peak growth in ~2 years).",
+    "CS2": "Lower border of C2 is concave. Bodies of C3 and C4 are trapezoidal (Peak growth in ~1 year).",
+    "CS3": "Lower borders of C2 and C3 are concave. Bodies are trapezoidal/horizontal (Peak growth begins).",
+    "CS4": "Lower borders of C2, C3, and C4 are concave. Bodies are rectangular horizontal (Peak growth completed).",
+    "CS5": "Lower borders of C2, C3, and C4 are concave. At least one vertebra is square (Peak growth passed).",
+    "CS6": "Lower borders of C2, C3, and C4 are concave. At least one vertebra is rectangular vertical (Maturation complete).",
+}
+
 
 @dataclass
 class PredictionResult:
@@ -50,6 +59,7 @@ class PredictionResult:
         """Converts results into a JSON-serializable dictionary."""
         return {
             "stage": self.stage,
+            "clinical_summary": STAGE_DESCRIPTIONS.get(self.stage, ""),
             "image_size": {"width": self.image_size[0], "height": self.image_size[1]},
             "landmarks": {
                 name: list(coords)
@@ -70,7 +80,7 @@ def draw_landmarks_on_image(
 ) -> Image.Image:
     """
     Renders cervical vertebra landmark points, connecting anatomical outlines,
-    and optional text labels on the image.
+    and optional text labels on the PIL image.
     """
     annotated = image.copy()
     draw = ImageDraw.Draw(annotated)
@@ -147,6 +157,189 @@ def draw_landmarks_on_image(
                 )
 
     return annotated
+
+
+def visualize_with_matplotlib(
+    image: Image.Image,
+    result: PredictionResult,
+    save_path: Optional[str] = None,
+    show: bool = True,
+):
+    """
+    Renders a publication-grade two-panel visualization using Matplotlib:
+      - Left: Clean Full Lateral Cephalometric X-ray with landmark overlay & contours.
+      - Right: Zoomed cervical spine detail with non-intrusive, semi-transparent labels positioned outside the bone contours.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+
+    c2_color = "#FF7F50"   # Coral
+    c3_color = "#20B2AA"   # Teal
+    c4_color = "#4169E1"   # Royal Blue
+
+    fig, axes = plt.subplots(1, 2, figsize=(15, 8), facecolor="#0F172A")
+    fig.canvas.manager.set_window_title(f"CVM Prediction: {result.stage}")
+
+    # Title header
+    stage_text = f"CVM Stage: {result.stage}"
+    desc_text = STAGE_DESCRIPTIONS.get(result.stage, "")
+    fig.suptitle(
+        f"{stage_text}\n{desc_text}",
+        fontsize=14,
+        fontweight="bold",
+        color="white",
+        y=0.97,
+    )
+
+    c2 = result.landmarks_dict["C2"]
+    c3 = result.landmarks_dict["C3"]
+    c4 = result.landmarks_dict["C4"]
+
+    c2_pts = [c2["inferior-posterior"], c2["inferior-concavity"], c2["inferior-anterior"]]
+    c3_pts = [
+        c3["superior-posterior"],
+        c3["superior-anterior"],
+        c3["inferior-anterior"],
+        c3["inferior-concavity"],
+        c3["inferior-posterior"],
+        c3["superior-posterior"],
+    ]
+    c4_pts = [
+        c4["superior-posterior"],
+        c4["superior-anterior"],
+        c4["inferior-anterior"],
+        c4["inferior-concavity"],
+        c4["inferior-posterior"],
+        c4["superior-posterior"],
+    ]
+
+    # Calculate ROI bounding box around the 13 landmarks for zooming the right view
+    xs = [p[0] for p in result.landmarks_array]
+    ys = [p[1] for p in result.landmarks_array]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    span_x = max(max_x - min_x, 30)
+    span_y = max(max_y - min_y, 30)
+
+    # Generous horizontal padding so labels on the left/right fit cleanly
+    pad_x = span_x * 0.75
+    pad_y = span_y * 0.35
+
+    roi_x0 = max(0, min_x - pad_x)
+    roi_y0 = max(0, min_y - pad_y)
+    roi_x1 = min(result.image_size[0], max_x + pad_x)
+    roi_y1 = min(result.image_size[1], max_y + pad_y)
+
+    for ax in axes:
+        ax.imshow(image, cmap="gray" if image.mode == "L" else None)
+        ax.set_facecolor("#0F172A")
+
+        # C2 line & points
+        ax.plot([p[0] for p in c2_pts], [p[1] for p in c2_pts], color=c2_color, linewidth=2.0, zorder=3)
+        for p in c2_pts:
+            ax.scatter(p[0], p[1], color=c2_color, s=36, edgecolors="white", linewidths=1.0, zorder=5)
+
+        # C3 outline & points
+        ax.plot([p[0] for p in c3_pts], [p[1] for p in c3_pts], color=c3_color, linewidth=2.0, zorder=3)
+        for p in c3_pts:
+            ax.scatter(p[0], p[1], color=c3_color, s=36, edgecolors="white", linewidths=1.0, zorder=5)
+
+        # C4 outline & points
+        ax.plot([p[0] for p in c4_pts], [p[1] for p in c4_pts], color=c4_color, linewidth=2.0, zorder=3)
+        for p in c4_pts:
+            ax.scatter(p[0], p[1], color=c4_color, s=36, edgecolors="white", linewidths=1.0, zorder=5)
+
+    # --- Left Panel: Full Cephalogram (Clean, no ROI rectangle) ---
+    axes[0].set_title("Full Cephalometric X-ray", color="#94A3B8", fontsize=13, fontweight="600", pad=10)
+    axes[0].axis("off")
+
+    # --- Right Panel: Zoomed Cervical Spine Detail ---
+    axes[1].set_title("Zoomed Vertebrae (C2, C3, C4) & 13 Landmarks", color="#94A3B8", fontsize=13, fontweight="600", pad=10)
+    axes[1].set_xlim(roi_x0, roi_x1)
+    axes[1].set_ylim(roi_y1, roi_y0)  # Inverted for image coordinate space
+    axes[1].axis("off")
+
+    # Smart label placement offsets:
+    # Posterior landmarks placed to the left; Anterior landmarks placed to the right;
+    # Concavity landmarks placed into open disc space.
+    label_offsets = {
+        # Posterior landmarks (left side) -> offset left
+        "C2_PI": (-38, 0, "right", "center"),
+        "C3_PS": (-38, -6, "right", "center"),
+        "C3_PI": (-38, 0, "right", "center"),
+        "C4_PS": (-38, -6, "right", "center"),
+        "C4_PI": (-38, 0, "right", "center"),
+        # Anterior landmarks (right side) -> offset right
+        "C2_AI": (38, 0, "left", "center"),
+        "C3_AS": (38, -6, "left", "center"),
+        "C3_AI": (38, 0, "left", "center"),
+        "C4_AS": (38, -6, "left", "center"),
+        "C4_AI": (38, 0, "left", "center"),
+        # Concavity landmarks -> placed into adjacent open spaces
+        "C2_IC": (0, -16, "center", "bottom"),
+        "C3_IC": (0, 16, "center", "top"),
+        "C4_IC": (0, 16, "center", "top"),
+    }
+
+    # Add non-intrusive landmark annotations with thin leader lines and semi-transparent badges
+    for name, (px, py) in zip(LANDMARK_LABELS, result.landmarks_array):
+        dx, dy, ha, va = label_offsets.get(name, (30, 0, "left", "center"))
+        axes[1].annotate(
+            name,
+            xy=(px, py),
+            xytext=(dx, dy),
+            textcoords="offset points",
+            ha=ha,
+            va=va,
+            fontsize=7,
+            fontweight="bold",
+            color="#F1F5F9",
+            bbox=dict(
+                boxstyle="round,pad=0.22",
+                fc="#0F172A",
+                ec="#64748B",
+                alpha=0.45,  # Semi-transparent to reveal underlying structures
+                linewidth=0.5,
+            ),
+            arrowprops=dict(
+                arrowstyle="-",
+                color="#94A3B8",
+                lw=0.6,
+                alpha=0.55,
+                shrinkA=2,
+                shrinkB=3,
+            ),
+            zorder=6,
+        )
+
+    # Clean Legend at bottom (C2, C3, C4 only)
+    legend_elements = [
+        Patch(facecolor=c2_color, edgecolor="white", label="C2 (Axis: PI, IC, AI)"),
+        Patch(facecolor=c3_color, edgecolor="white", label="C3 (PS, AS, PI, IC, AI)"),
+        Patch(facecolor=c4_color, edgecolor="white", label="C4 (PS, AS, PI, IC, AI)"),
+    ]
+    fig.legend(
+        handles=legend_elements,
+        loc="lower center",
+        ncol=3,
+        frameon=True,
+        facecolor="#1E293B",
+        edgecolor="#334155",
+        fontsize=10.5,
+        labelcolor="white",
+    )
+
+    plt.tight_layout(rect=[0, 0.05, 1, 0.93])
+
+    if save_path:
+        plt.savefig(save_path, dpi=200, bbox_inches="tight", facecolor=fig.get_facecolor())
+        print(f"[Saved] Matplotlib plot saved to: {save_path}")
+
+    if show:
+        try:
+            plt.show()
+        except Exception as e:
+            print(f"[Warning] Could not display matplotlib interactive window: {e}")
 
 
 class CVMPredictor:
@@ -308,30 +501,26 @@ class CVMPredictor:
 
 def print_cli_report(result: PredictionResult, image_path: Optional[str] = None):
     """Prints a detailed terminal report of CVM prediction and geometric metrics."""
-    stage_desc = {
-        "CS1": "Lower borders of C2, C3, and C4 are flat. Bodies of C3 and C4 are trapezoidal (Peak growth in ~2 years).",
-        "CS2": "Lower border of C2 is concave. Bodies of C3 and C4 are trapezoidal (Peak growth in ~1 year).",
-        "CS3": "Lower borders of C2 and C3 are concave. Bodies are trapezoidal/horizontal (Peak growth begins).",
-        "CS4": "Lower borders of C2, C3, and C4 are concave. Bodies are rectangular horizontal (Peak growth completed).",
-        "CS5": "Lower borders of C2, C3, and C4 are concave. At least one vertebra is square (Peak growth passed).",
-        "CS6": "Lower borders of C2, C3, and C4 are concave. At least one vertebra is rectangular vertical (Maturation complete).",
-    }
-
     print("\n" + "=" * 70)
     print("  CERVICAL VERTEBRAL MATURATION (CVM) PREDICTION REPORT")
     print("=" * 70)
     if image_path:
         print(f"Input Image : {image_path} (Size: {result.image_size[0]}x{result.image_size[1]})")
     print(f"Final Stage : \033[1;32m{result.stage}\033[0m")
-    print(f"Clinical    : {stage_desc.get(result.stage, '')}")
+    print(f"Clinical    : {STAGE_DESCRIPTIONS.get(result.stage, '')}")
+    if result.details.get("table_2_exact_match"):
+        print("Rule Match  : \033[1;34mExact match with Table 2\033[0m")
+    s = result.details.get("spatial_calibration_mm_per_px", 0.375)
+    th_mm = result.details.get("concavity_threshold_mm", 1.0)
+    print(f"Calibration : S = {s:.3f} mm/pixel (Concavity Presence Threshold: {th_mm:.1f} mm)")
     print("-" * 70)
 
     # Vertebra C2
     c2 = result.details["C2"]
     c2_concave_str = "CONCAVE" if c2["is_concave"] else "FLAT"
     print(f"\n[Vertebra C2 (Axis)]")
-    print(f"  Concavity Depth : {c2['concavity_depth']:.2f} px")
-    print(f"  Concavity Ratio : {c2['concavity_ratio']:.3f} -> Status: {c2_concave_str}")
+    print(f"  Concavity Depth : {c2['concavity_depth_px']:.2f} px ({c2['concavity_depth_mm']:.2f} mm)")
+    print(f"  Concavity Ratio : {c2['concavity_ratio']:.3f} -> Status: {c2_concave_str} (Notch: {c2.get('notch', 0)})")
 
     # Vertebra C3 & C4
     for vert_id in ["C3", "C4"]:
@@ -339,9 +528,9 @@ def print_cli_report(result: PredictionResult, image_path: Optional[str] = None)
         sh = v["shape_metrics"]
         v_concave_str = "CONCAVE" if v["is_concave"] else "FLAT"
         print(f"\n[Vertebra {vert_id}]")
-        print(f"  Concavity Ratio : {v['concavity_ratio']:.3f} -> Status: {v_concave_str}")
-        print(f"  Width/Height    : {sh['wh_ratio']:.3f} (Avg W: {sh['w_average']:.1f}px, Avg H: {sh['h_average']:.1f}px)")
-        print(f"  Tapering (Ha/Hp): {sh['taper_ratio']:.3f}")
+        print(f"  Concavity Depth : {v['concavity_depth_px']:.2f} px ({v['concavity_depth_mm']:.2f} mm) -> Status: {v_concave_str} (Notch: {v.get('notch', 0)})")
+        print(f"  Shape Index (SI): {sh['shape_index']:.3f} (Ha={sh['h_anterior']:.1f}px, Hp={sh['h_posterior']:.1f}px, Ws={sh['w_superior']:.1f}px, Wi={sh['w_inferior']:.1f}px)")
+        print(f"  Taper Ratio (TR): {sh['taper_ratio']:.3f} (Ha / Hp)")
         print(f"  Classified Shape: \033[1;34m{sh['shape']}\033[0m")
 
     print("\n[Predicted 13 Landmarks (Image Pixel Coordinates)]")
@@ -381,42 +570,81 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Compute device to use (default: auto)",
     )
     parser.add_argument(
+        "--show",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Display interactive Matplotlib visualization window (default: --show, use --no-show to disable)",
+    )
+    parser.add_argument(
+        "--save-plot",
+        type=str,
+        default=None,
+        help="Save Matplotlib publication-grade figure to path (e.g. plot.png)",
+    )
+    parser.add_argument(
         "--output-image",
         "-o",
         type=str,
         default=None,
-        help="Optional path to save image with visualized landmarks overlay",
+        help="Save raw image with visualized landmarks overlay",
     )
     parser.add_argument(
         "--output-json",
         "-j",
         type=str,
         default=None,
-        help="Optional path to save inference results and metrics as JSON",
+        help="Save inference results and metrics as JSON",
+    )
+    # Section 2.5 parameters
+    parser.add_argument(
+        "--calibration-factor",
+        "--pixel-to-mm",
+        dest="pixel_to_mm",
+        type=float,
+        default=0.375,
+        help="Spatial calibration factor S in mm/pixel (default: 0.375 mm/px)",
+    )
+    parser.add_argument(
+        "--concavity-threshold-mm",
+        type=float,
+        default=1.0,
+        help="Physical concavity depth threshold in mm (default: 1.0 mm)",
     )
     parser.add_argument(
         "--concavity-threshold",
         type=float,
         default=0.05,
-        help="Concavity ratio threshold (default: 0.05)",
+        help="Fallback relative concavity ratio threshold if absolute depth disabled (default: 0.05)",
+    )
+    parser.add_argument(
+        "--use-absolute-depth",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use physical mm concavity depth threshold instead of relative ratio (default: True)",
     )
     parser.add_argument(
         "--taper-threshold",
         type=float,
-        default=0.90,
-        help="Trapezoid tapering ratio threshold (default: 0.90)",
+        default=1.15,
+        help="Trapezoid tapering ratio threshold TR >= threshold (default: 1.15)",
+    )
+    parser.add_argument(
+        "--trapezoid-si-threshold",
+        type=float,
+        default=0.75,
+        help="Trapezoid shape index threshold SI <= threshold (default: 0.75)",
     )
     parser.add_argument(
         "--rect-horizontal-threshold",
         type=float,
-        default=1.20,
-        help="Rectangular horizontal ratio threshold (default: 1.20)",
+        default=0.85,
+        help="Rectangular horizontal shape index upper threshold (default: 0.85)",
     )
     parser.add_argument(
         "--rect-vertical-threshold",
         type=float,
-        default=0.85,
-        help="Rectangular vertical ratio threshold (default: 0.85)",
+        default=1.15,
+        help="Rectangular vertical shape index threshold SI >= threshold (default: 1.15)",
     )
     parser.add_argument(
         "--draw-labels",
@@ -437,10 +665,14 @@ def main():
     args = parser.parse_args()
 
     thresholds = CVMThresholds(
+        use_absolute_depth=args.use_absolute_depth,
+        pixel_to_mm=args.pixel_to_mm,
+        concavity_depth_mm_threshold=args.concavity_threshold_mm,
         concavity_ratio_threshold=args.concavity_threshold,
-        trapezoid_height_ratio_threshold=args.taper_threshold,
-        rect_horizontal_threshold=args.rect_horizontal_threshold,
-        rect_vertical_threshold=args.rect_vertical_threshold,
+        trapezoid_taper_threshold=args.taper_threshold,
+        trapezoid_si_threshold=args.trapezoid_si_threshold,
+        rect_horizontal_si_threshold=args.rect_horizontal_threshold,
+        rect_vertical_si_threshold=args.rect_vertical_threshold,
     )
 
     predictor = CVMPredictor(
@@ -448,8 +680,10 @@ def main():
         device=args.device,
     )
 
+    pil_img = Image.open(args.image).convert("RGB")
+
     result = predictor.predict(
-        image_input=args.image,
+        image_input=pil_img,
         thresholds=thresholds,
         annotate=bool(args.output_image) or not args.quiet,
         draw_labels=args.draw_labels,
@@ -468,6 +702,15 @@ def main():
         with open(args.output_json, "w") as f:
             json.dump(result.to_dict(), f, indent=2)
         print(f"[Saved] JSON metrics saved to: {args.output_json}")
+
+    # Display / save Matplotlib visualization
+    if args.show or args.save_plot:
+        visualize_with_matplotlib(
+            image=pil_img,
+            result=result,
+            save_path=args.save_plot,
+            show=args.show,
+        )
 
 
 if __name__ == "__main__":

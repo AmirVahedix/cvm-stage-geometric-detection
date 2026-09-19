@@ -76,23 +76,74 @@ class CVMInput:
 
 @dataclass
 class CVMThresholds:
-    """Configuration thresholds for shape and concavity classification."""
-    # Concavity thresholds
-    # If absolute_depth is used, concavity_depth_mm > concavity_depth_mm_threshold
-    # Otherwise, relative concavity ratio (depth / base_length) > concavity_ratio_threshold
-    use_absolute_depth: bool = False
-    concavity_ratio_threshold: float = 0.05  # 5% of base length
-    concavity_depth_mm_threshold: float = 1.0  # 1.0 mm (requires pixel_to_mm)
-    pixel_to_mm: Optional[float] = None
+    """Configuration thresholds for shape and concavity classification based on manuscript Section 2.5."""
+    # Concavity thresholds (Section 2.5.1)
+    # Using spatial calibration factor S = 0.375 mm/pixel
+    # Presence: d_{c, k}^{mm} >= 1.0 mm
+    use_absolute_depth: bool = True
+    pixel_to_mm: float = 0.375  # S = 0.375 mm/pixel
+    concavity_depth_mm_threshold: float = 1.0  # 1.0 mm
+    concavity_ratio_threshold: float = 0.05  # Fallback relative ratio if use_absolute_depth=False
 
-    # Shape ratios thresholds (C3 and C4)
-    # Trapezoid: if anterior height / posterior height < trapezoid_height_ratio_threshold
-    trapezoid_height_ratio_threshold: float = 0.90
-    # Rectangular Horizontal: if width / height >= rect_horizontal_threshold
-    rect_horizontal_threshold: float = 1.20
-    # Square: if square_lower_threshold <= width / height < rect_horizontal_threshold
-    # Rectangular Vertical: if width / height < rect_vertical_threshold
-    rect_vertical_threshold: float = 0.85
+    # Shape ratio thresholds (C3 and C4, Section 2.5.2)
+    # Trapezoidal: TR >= 1.15 or SI <= 0.75
+    trapezoid_taper_threshold: float = 1.15
+    trapezoid_si_threshold: float = 0.75
+    # Rectangular Horizontal: 0.75 < SI <= 0.85 and TR < 1.15
+    rect_horizontal_si_threshold: float = 0.85
+    # Square: 0.90 <= SI <= 1.10
+    square_si_lower: float = 0.90
+    square_si_upper: float = 1.10
+    # Rectangular Vertical: SI >= 1.15
+    rect_vertical_si_threshold: float = 1.15
+
+    # Backward compatibility aliases
+    @property
+    def trapezoid_height_ratio_threshold(self) -> float:
+        return self.trapezoid_taper_threshold
+
+    @property
+    def rect_horizontal_threshold(self) -> float:
+        return self.rect_horizontal_si_threshold
+
+    @property
+    def rect_vertical_threshold(self) -> float:
+        return self.rect_vertical_si_threshold
+
+
+# --- Table 2 Ground-Truth Diagnostic Rule Table ---
+TABLE_2_RULES = [
+    {
+        "stage": "CS1",
+        "c2_notch": 0, "c3_notch": 0, "c4_notch": 0,
+        "c3_shape": "Trapezoidal", "c4_shape": "Trapezoidal",
+    },
+    {
+        "stage": "CS2",
+        "c2_notch": 1, "c3_notch": 0, "c4_notch": 0,
+        "c3_shape": "Trapezoidal", "c4_shape": "Trapezoidal",
+    },
+    {
+        "stage": "CS3",
+        "c2_notch": 1, "c3_notch": 1, "c4_notch": 0,
+        "c3_shape": "Rectangular Horizontal", "c4_shape": "Trapezoidal",
+    },
+    {
+        "stage": "CS4",
+        "c2_notch": 1, "c3_notch": 1, "c4_notch": 1,
+        "c3_shape": "Rectangular Horizontal", "c4_shape": "Rectangular Horizontal",
+    },
+    {
+        "stage": "CS5",
+        "c2_notch": 1, "c3_notch": 1, "c4_notch": 1,
+        "c3_shape": "Square", "c4_shape": "Square",
+    },
+    {
+        "stage": "CS6",
+        "c2_notch": 1, "c3_notch": 1, "c4_notch": 1,
+        "c3_shape": "Rectangular Vertical", "c4_shape": "Rectangular Vertical",
+    },
+]
 
 
 # --- Geometric Helper Functions ---
@@ -103,15 +154,19 @@ def euclidean_distance(p1: Point, p2: Point) -> float:
 
 
 def perpendicular_distance(point: Point, line_start: Point, line_end: Point) -> float:
-    """Calculates the perpendicular distance from a point to the line segment connecting line_start and line_end."""
+    """
+    Calculates the perpendicular Euclidean distance from point (p_IC) to the
+    inferior cortical baseline connecting line_start (p_PI) and line_end (p_AI):
+    d_{c, k} = |(x_AI - x_PI)(y_PI - y_IC) - (x_PI - x_IC)(y_AI - y_PI)| / sqrt((x_AI - x_PI)^2 + (y_AI - y_PI)^2)
+    """
     dx = line_end.x - line_start.x
     dy = line_end.y - line_start.y
     base_len = math.sqrt(dx ** 2 + dy ** 2)
     if base_len == 0:
         return euclidean_distance(point, line_start)
     
-    # Perpendicular distance to line formula: |dx*(y1-y0) - dy*(x1-x0)| / base_len
-    numerator = abs(dx * (line_start.y - point.y) - dy * (line_start.x - point.x))
+    # Perpendicular distance to line formula (Section 2.5.1)
+    numerator = abs(dx * (line_start.y - point.y) - (line_start.x - point.x) * dy)
     return numerator / base_len
 
 
@@ -121,64 +176,88 @@ def calculate_concavity(
     ip: Point, ic: Point, ia: Point, thresholds: CVMThresholds
 ) -> Tuple[float, float, bool]:
     """
-    Calculates the concavity depth and ratio of a vertebra.
-    Returns: (depth, ratio, is_concave)
+    Calculates the concavity depth and ratio of a vertebra following Section 2.5.1.
+    Using spatial calibration factor S = 0.375 mm/pixel:
+        d_{c, k}^{mm} = d_{c, k} * S
+        C_k = 1 if d_{c, k}^{mm} >= 1.0 mm else 0
+    Returns: (depth_px, ratio, is_concave)
     """
-    depth = perpendicular_distance(ic, ip, ia)
+    depth_px = perpendicular_distance(ic, ip, ia)
     base_len = euclidean_distance(ip, ia)
-    ratio = depth / base_len if base_len > 0 else 0.0
+    ratio = depth_px / base_len if base_len > 0 else 0.0
+
+    s = thresholds.pixel_to_mm if thresholds.pixel_to_mm is not None else 0.375
+    depth_mm = depth_px * s
 
     if thresholds.use_absolute_depth:
-        if thresholds.pixel_to_mm is None:
-            raise ValueError("pixel_to_mm must be set if use_absolute_depth is True.")
-        depth_mm = depth * thresholds.pixel_to_mm
         is_concave = depth_mm >= thresholds.concavity_depth_mm_threshold
     else:
         is_concave = ratio >= thresholds.concavity_ratio_threshold
 
-    return depth, ratio, is_concave
+    return depth_px, ratio, is_concave
 
 
 def calculate_shape(
     sp: Point, sa: Point, ip: Point, ia: Point, thresholds: CVMThresholds
 ) -> Dict[str, Any]:
     """
-    Calculates shape metrics and classifies the shape of a C3/C4 vertebra.
-    Returns a dictionary of metrics and the resulting shape class.
+    Calculates morphometric dimensions and classifies the shape of a C3/C4 vertebra
+    strictly following Section 2.5.2 of the manuscript.
+
+    Dimensions:
+        H_a = ||p_AS - p_AI||_2 (anterior height)
+        H_p = ||p_PS - p_PI||_2 (posterior height)
+        W_s = ||p_PS - p_AS||_2 (superior width)
+        W_i = ||p_PI - p_AI||_2 (inferior width)
+
+    Indices:
+        SI = (H_a + H_p) / (W_s + W_i)  [Shape Index]
+        TR = H_a / H_p                  [Taper Ratio]
+
+    Classification Rules (Section 2.5.2):
+        - Trapezoidal (S_trap): TR >= 1.15 or SI <= 0.75
+        - Rectangular Horizontal (S_horiz): 0.75 < SI <= 0.85 and TR < 1.15
+        - Square (S_sq): 0.90 <= SI <= 1.10
+        - Rectangular Vertical (S_vert): SI >= 1.15
+
+    Buffer intervals (assigned to nearest categorical threshold):
+        - (0.85, 0.90): midpoint 0.875 -> SI <= 0.875 maps to 0.85 (Rect. Horizontal), > 0.875 maps to 0.90 (Square)
+        - (1.10, 1.15): midpoint 1.125 -> SI <= 1.125 maps to 1.10 (Square), > 1.125 maps to 1.15 (Rect. Vertical)
     """
-    h_posterior = euclidean_distance(sp, ip)
-    h_anterior = euclidean_distance(sa, ia)
-    h_average = (h_posterior + h_anterior) / 2.0
+    h_posterior = euclidean_distance(sp, ip)  # H_p
+    h_anterior = euclidean_distance(sa, ia)   # H_a
+    w_superior = euclidean_distance(sp, sa)   # W_s
+    w_inferior = euclidean_distance(ip, ia)   # W_i
 
-    w_superior = euclidean_distance(sp, sa)
-    w_inferior = euclidean_distance(ip, ia)
-    w_average = (w_superior + w_inferior) / 2.0
-
-    # Trapezoid tapering ratio: anterior height / posterior height
+    width_sum = w_superior + w_inferior
+    shape_index = (h_anterior + h_posterior) / width_sum if width_sum > 0 else 1.0
     taper_ratio = h_anterior / h_posterior if h_posterior > 0 else 1.0
-    
-    # Width-to-height ratio
-    wh_ratio = w_average / h_average if h_average > 0 else 1.0
 
-    # Classification logic
-    if taper_ratio <= thresholds.trapezoid_height_ratio_threshold:
+    # Buffer midpoints computed dynamically from configured thresholds
+    buffer_horiz_sq = (thresholds.rect_horizontal_si_threshold + thresholds.square_si_lower) / 2.0  # 0.875
+    buffer_sq_vert = (thresholds.square_si_upper + thresholds.rect_vertical_si_threshold) / 2.0    # 1.125
+
+    if taper_ratio >= thresholds.trapezoid_taper_threshold or shape_index <= thresholds.trapezoid_si_threshold:
         shape_class = "Trapezoidal"
-    elif wh_ratio >= thresholds.rect_horizontal_threshold:
+    elif shape_index <= buffer_horiz_sq:
         shape_class = "Rectangular Horizontal"
-    elif wh_ratio < thresholds.rect_vertical_threshold:
-        shape_class = "Rectangular Vertical"
-    else:
+    elif shape_index <= buffer_sq_vert:
         shape_class = "Square"
+    else:
+        shape_class = "Rectangular Vertical"
 
     return {
         "h_posterior": h_posterior,
         "h_anterior": h_anterior,
-        "h_average": h_average,
         "w_superior": w_superior,
         "w_inferior": w_inferior,
-        "w_average": w_average,
+        "h_average": (h_posterior + h_anterior) / 2.0,
+        "w_average": (w_superior + w_inferior) / 2.0,
+        "shape_index": shape_index,
         "taper_ratio": taper_ratio,
-        "wh_ratio": wh_ratio,
+        "si": shape_index,
+        "tr": taper_ratio,
+        "wh_ratio": shape_index,  # Shape index is height/width as defined in Section 2.5.2
         "shape": shape_class,
     }
 
@@ -187,7 +266,8 @@ def classify_cvm_stage(
     input_data: CVMInput, thresholds: Optional[CVMThresholds] = None
 ) -> Dict[str, Any]:
     """
-    Classifies the Cervical Vertebral Maturation (CVM) stage (CS1-CS6) based on 13 landmarks.
+    Classifies the Cervical Vertebral Maturation (CVM) stage (CS1-CS6) based on 13 landmarks
+    following Section 2.5 and Table 2 of the manuscript.
     
     Args:
         input_data: CVMInput containing the landmark points for C2, C3, and C4.
@@ -239,79 +319,104 @@ def classify_cvm_stage(
         thresholds
     )
 
-    # --- Rule Engine for CVM Stage Staging ---
-    # We compile the features to determine the stage:
+    # --- Rule Engine for CVM Stage Staging (Section 2.5.3, Table 2) ---
+    n2 = 1 if c2_concave else 0
+    n3 = 1 if c3_concave else 0
+    n4 = 1 if c4_concave else 0
     shape3 = c3_shape_metrics["shape"]
     shape4 = c4_shape_metrics["shape"]
 
-    # 1. Determine CVM Stage by concavities first, then refine with shape.
-    # CS1: Flat C2, C3, C4. C3 & C4 are Trapezoidal.
-    # CS2: C2 concave. C3 & C4 are Trapezoidal.
-    # CS3: C2 & C3 concave. C3 & C4 are Trapezoidal or Rectangular Horizontal.
-    # CS4: C2, C3, C4 all concave. C3 & C4 are Rectangular Horizontal.
-    # CS5: C2, C3, C4 all concave. At least one is Square.
-    # CS6: C2, C3, C4 all concave. At least one is Rectangular Vertical.
-    
-    # In case of discrepancies between concavity development and shape development:
-    # We prioritize the concavities to narrow down the growth phase, but also check the shapes.
-    if c2_concave and c3_concave and c4_concave:
-        # High maturity stages: CS4, CS5, CS6
-        if shape3 == "Rectangular Vertical" or shape4 == "Rectangular Vertical":
-            stage = "CS6"
-        elif shape3 == "Square" or shape4 == "Square":
-            stage = "CS5"
-        else:
-            # Both horizontal or trapezoidal
-            stage = "CS4"
-    elif c2_concave and c3_concave:
-        # CS3 stage: C2 & C3 are concave, C4 is flat.
-        if shape3 == "Rectangular Vertical" or shape4 == "Rectangular Vertical":
-            stage = "CS6"
-        elif shape3 == "Square" or shape4 == "Square":
-            stage = "CS5"
-        else:
-            stage = "CS3"
-    elif c2_concave:
-        # CS2 stage: C2 is concave, C3 & C4 are flat.
-        if shape3 == "Rectangular Vertical" or shape4 == "Rectangular Vertical":
-            stage = "CS6"
-        elif shape3 == "Square" or shape4 == "Square":
-            stage = "CS5"
-        elif shape3 == "Rectangular Horizontal" and shape4 == "Rectangular Horizontal":
-            stage = "CS4"
-        else:
-            stage = "CS2"
-    else:
-        # CS1 stage: C2 is flat.
-        if shape3 == "Rectangular Vertical" or shape4 == "Rectangular Vertical":
-            stage = "CS6"
-        elif shape3 == "Square" or shape4 == "Square":
-            stage = "CS5"
-        elif c3_concave and c4_concave:
-            stage = "CS4"
-        elif c3_concave:
-            stage = "CS3"
-        else:
-            stage = "CS1"
+    # 1. Check exact match with Table 2
+    exact_stage = None
+    for rule in TABLE_2_RULES:
+        if (
+            rule["c2_notch"] == n2
+            and rule["c3_notch"] == n3
+            and rule["c4_notch"] == n4
+            and rule["c3_shape"] == shape3
+            and rule["c4_shape"] == shape4
+        ):
+            exact_stage = rule["stage"]
+            break
 
+    if exact_stage is not None:
+        stage = exact_stage
+    else:
+        # Hierarchical rule engine encoding Table 2 & Baccetti criteria for boundary/intermediate cases
+        if c2_concave and c3_concave and c4_concave:
+            # CS4, CS5, CS6: differentiated by shape maturation
+            if shape3 == "Rectangular Vertical" or shape4 == "Rectangular Vertical":
+                stage = "CS6"
+            elif shape3 == "Square" or shape4 == "Square":
+                stage = "CS5"
+            else:
+                stage = "CS4"
+        elif c2_concave and c3_concave:
+            # CS3: C2 & C3 concave, C4 flat
+            if shape3 == "Rectangular Vertical" or shape4 == "Rectangular Vertical":
+                stage = "CS6"
+            elif shape3 == "Square" or shape4 == "Square":
+                stage = "CS5"
+            else:
+                stage = "CS3"
+        elif c2_concave:
+            # CS2: C2 concave, C3 & C4 flat
+            if shape3 == "Rectangular Vertical" or shape4 == "Rectangular Vertical":
+                stage = "CS6"
+            elif shape3 == "Square" or shape4 == "Square":
+                stage = "CS5"
+            elif shape3 == "Rectangular Horizontal" and shape4 == "Rectangular Horizontal":
+                stage = "CS4"
+            elif shape3 == "Rectangular Horizontal":
+                stage = "CS3"
+            else:
+                stage = "CS2"
+        else:
+            # CS1: Flat C2
+            if shape3 == "Rectangular Vertical" or shape4 == "Rectangular Vertical":
+                stage = "CS6"
+            elif shape3 == "Square" or shape4 == "Square":
+                stage = "CS5"
+            elif c3_concave and c4_concave:
+                stage = "CS4"
+            elif c3_concave:
+                stage = "CS3"
+            elif shape3 == "Rectangular Horizontal":
+                stage = "CS3"
+            else:
+                stage = "CS1"
+
+    s = thresholds.pixel_to_mm if thresholds.pixel_to_mm is not None else 0.375
     details = {
+        "spatial_calibration_mm_per_px": s,
+        "concavity_threshold_mm": thresholds.concavity_depth_mm_threshold,
         "C2": {
             "concavity_depth": c2_depth,
+            "concavity_depth_px": c2_depth,
+            "concavity_depth_mm": c2_depth * s,
             "concavity_ratio": c2_ratio,
             "is_concave": c2_concave,
+            "notch": n2,
         },
         "C3": {
             "concavity_depth": c3_depth,
+            "concavity_depth_px": c3_depth,
+            "concavity_depth_mm": c3_depth * s,
             "concavity_ratio": c3_ratio,
             "is_concave": c3_concave,
+            "notch": n3,
             "shape_metrics": c3_shape_metrics,
         },
         "C4": {
             "concavity_depth": c4_depth,
+            "concavity_depth_px": c4_depth,
+            "concavity_depth_mm": c4_depth * s,
             "concavity_ratio": c4_ratio,
             "is_concave": c4_concave,
+            "notch": n4,
             "shape_metrics": c4_shape_metrics,
         },
+        "table_2_exact_match": exact_stage is not None,
     }
 
     return {

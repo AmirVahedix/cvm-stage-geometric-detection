@@ -42,52 +42,72 @@ class TestCVMGeometricFunctions(unittest.TestCase):
 
 class TestCVMFeatureClassification(unittest.TestCase):
     def setUp(self):
-        self.thresholds = CVMThresholds()
+        # Default thresholds from Section 2.5: S = 0.375 mm/px, depth >= 1.0 mm
+        self.thresholds = CVMThresholds(
+            use_absolute_depth=True,
+            pixel_to_mm=0.375,
+            concavity_depth_mm_threshold=1.0,
+        )
 
     def test_calculate_concavity_flat(self):
+        # Base length = 10, depth = 1.0 px -> 1.0 * 0.375 = 0.375 mm < 1.0 mm -> Flat
         ip = Point(0, 0)
-        ic = Point(5, 0.1)  # tiny concavity depth (0.1) relative to base length (10)
+        ic = Point(5, 1.0)
         ia = Point(10, 0)
         
         depth, ratio, is_concave = calculate_concavity(ip, ic, ia, self.thresholds)
-        self.assertAlmostEqual(depth, 0.1)
-        self.assertAlmostEqual(ratio, 0.01)
+        self.assertAlmostEqual(depth, 1.0)
+        self.assertAlmostEqual(ratio, 0.10)
         self.assertFalse(is_concave)
 
     def test_calculate_concavity_concave(self):
+        # Base length = 10, depth = 3.0 px -> 3.0 * 0.375 = 1.125 mm >= 1.0 mm -> Concave
         ip = Point(0, 0)
-        ic = Point(5, 0.8)  # concavity depth 0.8 relative to base length 10 (ratio 0.08 >= 0.05)
+        ic = Point(5, 3.0)
         ia = Point(10, 0)
         
         depth, ratio, is_concave = calculate_concavity(ip, ic, ia, self.thresholds)
-        self.assertAlmostEqual(depth, 0.8)
-        self.assertAlmostEqual(ratio, 0.08)
+        self.assertAlmostEqual(depth, 3.0)
+        self.assertAlmostEqual(ratio, 0.30)
         self.assertTrue(is_concave)
 
-    def test_calculate_shape_trapezoidal(self):
-        # Posterior height = 10, Anterior height = 7 (taper ratio = 0.7 <= 0.90)
-        sp = Point(0, 10)
-        sa = Point(10, 7)
+    def test_calculate_shape_trapezoidal_by_si(self):
+        # Ha = 5, Hp = 5, Ws = 10, Wi = 10 -> SI = 10 / 20 = 0.50 <= 0.75 -> Trapezoidal
+        sp = Point(0, 5)
+        sa = Point(10, 5)
         ip = Point(0, 0)
         ia = Point(10, 0)
         
         metrics = calculate_shape(sp, sa, ip, ia, self.thresholds)
         self.assertEqual(metrics["shape"], "Trapezoidal")
-        self.assertAlmostEqual(metrics["taper_ratio"], 0.7)
+        self.assertAlmostEqual(metrics["shape_index"], 0.50)
+        self.assertAlmostEqual(metrics["taper_ratio"], 1.0)
+
+    def test_calculate_shape_trapezoidal_by_tr(self):
+        # Ha = 12, Hp = 10, Ws = 10, Wi = 10 -> TR = 1.20 >= 1.15 -> Trapezoidal
+        sp = Point(0, 10)
+        sa = Point(10, 12)
+        ip = Point(0, 0)
+        ia = Point(10, 0)
+        
+        metrics = calculate_shape(sp, sa, ip, ia, self.thresholds)
+        self.assertEqual(metrics["shape"], "Trapezoidal")
+        self.assertAlmostEqual(metrics["taper_ratio"], 1.20)
 
     def test_calculate_shape_rectangular_horizontal(self):
-        # Average height = 6, average width = 10 (wh_ratio = 10/6 = 1.67 >= 1.20)
-        sp = Point(0, 6)
-        sa = Point(10, 6)
+        # Ha = 8, Hp = 8, Ws = 10, Wi = 10 -> SI = 16 / 20 = 0.80 (0.75 < SI <= 0.85, TR < 1.15)
+        sp = Point(0, 8)
+        sa = Point(10, 8)
         ip = Point(0, 0)
         ia = Point(10, 0)
         
         metrics = calculate_shape(sp, sa, ip, ia, self.thresholds)
         self.assertEqual(metrics["shape"], "Rectangular Horizontal")
-        self.assertAlmostEqual(metrics["wh_ratio"], 1.67, places=2)
+        self.assertAlmostEqual(metrics["shape_index"], 0.80)
+        self.assertAlmostEqual(metrics["taper_ratio"], 1.0)
 
     def test_calculate_shape_square(self):
-        # Average height = 10, average width = 10 (wh_ratio = 1.0)
+        # Ha = 10, Hp = 10, Ws = 10, Wi = 10 -> SI = 20 / 20 = 1.00 (0.90 <= SI <= 1.10)
         sp = Point(0, 10)
         sa = Point(10, 10)
         ip = Point(0, 0)
@@ -95,55 +115,85 @@ class TestCVMFeatureClassification(unittest.TestCase):
         
         metrics = calculate_shape(sp, sa, ip, ia, self.thresholds)
         self.assertEqual(metrics["shape"], "Square")
-        self.assertAlmostEqual(metrics["wh_ratio"], 1.0)
+        self.assertAlmostEqual(metrics["shape_index"], 1.00)
 
     def test_calculate_shape_rectangular_vertical(self):
-        # Average height = 15, average width = 10 (wh_ratio = 10/15 = 0.67 < 0.85)
-        sp = Point(0, 15)
-        sa = Point(10, 15)
+        # Ha = 12, Hp = 12, Ws = 10, Wi = 10 -> SI = 24 / 20 = 1.20 >= 1.15
+        sp = Point(0, 12)
+        sa = Point(10, 12)
         ip = Point(0, 0)
         ia = Point(10, 0)
         
         metrics = calculate_shape(sp, sa, ip, ia, self.thresholds)
         self.assertEqual(metrics["shape"], "Rectangular Vertical")
-        self.assertAlmostEqual(metrics["wh_ratio"], 0.67, places=2)
+        self.assertAlmostEqual(metrics["shape_index"], 1.20)
+
+    def test_buffer_intervals(self):
+        # Buffer 1: (0.85, 0.90), midpoint = 0.875
+        # SI = 17.4 / 20 = 0.87 <= 0.875 -> nearest is 0.85 -> Rectangular Horizontal
+        sp1 = Point(0, 8.7)
+        sa1 = Point(10, 8.7)
+        ip = Point(0, 0)
+        ia = Point(10, 0)
+        m1 = calculate_shape(sp1, sa1, ip, ia, self.thresholds)
+        self.assertEqual(m1["shape"], "Rectangular Horizontal")
+
+        # SI = 17.6 / 20 = 0.88 > 0.875 -> nearest is 0.90 -> Square
+        sp2 = Point(0, 8.8)
+        sa2 = Point(10, 8.8)
+        m2 = calculate_shape(sp2, sa2, ip, ia, self.thresholds)
+        self.assertEqual(m2["shape"], "Square")
+
+        # Buffer 2: (1.10, 1.15), midpoint = 1.125
+        # SI = 22.2 / 20 = 1.11 <= 1.125 -> nearest is 1.10 -> Square
+        sp3 = Point(0, 11.1)
+        sa3 = Point(10, 11.1)
+        m3 = calculate_shape(sp3, sa3, ip, ia, self.thresholds)
+        self.assertEqual(m3["shape"], "Square")
+
+        # SI = 22.8 / 20 = 1.14 > 1.125 -> nearest is 1.15 -> Rectangular Vertical
+        sp4 = Point(0, 11.4)
+        sa4 = Point(10, 11.4)
+        m4 = calculate_shape(sp4, sa4, ip, ia, self.thresholds)
+        self.assertEqual(m4["shape"], "Rectangular Vertical")
 
 
 class TestCVMStaging(unittest.TestCase):
     def helper_make_c2(self, concave: bool) -> VertebraC2:
         ip = Point(0, 0)
         ia = Point(10, 0)
-        ic = Point(5, 0.8 if concave else 0.1)
+        # S = 0.375 mm/px: 3.0 px = 1.125 mm (concave), 0.5 px = 0.1875 mm (flat)
+        ic = Point(5, 3.0 if concave else 0.5)
         return VertebraC2(ip, ic, ia)
 
     def helper_make_c3c4(self, concave: bool, shape: str) -> VertebraC3C4:
         ip = Point(0, 0)
         ia = Point(10, 0)
-        ic = Point(5, 0.8 if concave else 0.1)
+        ic = Point(5, 3.0 if concave else 0.5)
         
         if shape == "Trapezoidal":
-            # posterior height = 10, anterior height = 7 (taper ratio = 0.7)
-            sp = Point(0, 10)
-            sa = Point(10, 7)
+            # SI = 10 / 20 = 0.50 <= 0.75
+            sp = Point(0, 5)
+            sa = Point(10, 5)
         elif shape == "Rectangular Horizontal":
-            # average height = 6 (wh_ratio = 1.67)
-            sp = Point(0, 6)
-            sa = Point(10, 6)
+            # SI = 16 / 20 = 0.80 (0.75 < SI <= 0.85)
+            sp = Point(0, 8)
+            sa = Point(10, 8)
         elif shape == "Square":
-            # average height = 10 (wh_ratio = 1.0)
+            # SI = 20 / 20 = 1.00 (0.90 <= SI <= 1.10)
             sp = Point(0, 10)
             sa = Point(10, 10)
         elif shape == "Rectangular Vertical":
-            # average height = 15 (wh_ratio = 0.67)
-            sp = Point(0, 15)
-            sa = Point(10, 15)
+            # SI = 24 / 20 = 1.20 >= 1.15
+            sp = Point(0, 12)
+            sa = Point(10, 12)
         else:
             raise ValueError(f"Unknown shape {shape}")
             
         return VertebraC3C4(ip, ic, ia, sp, sa)
 
     def test_cs1_stage(self):
-        # CS1: All flat, C3 & C4 are trapezoidal
+        # Table 2: CS1 -> C2=0, C3=0, C4=0, C3=Trapezoidal, C4=Trapezoidal
         c2 = self.helper_make_c2(concave=False)
         c3 = self.helper_make_c3c4(concave=False, shape="Trapezoidal")
         c4 = self.helper_make_c3c4(concave=False, shape="Trapezoidal")
@@ -151,12 +201,13 @@ class TestCVMStaging(unittest.TestCase):
         cvm_input = CVMInput(c2, c3, c4)
         result = classify_cvm_stage(cvm_input)
         self.assertEqual(result["stage"], "CS1")
+        self.assertTrue(result["details"]["table_2_exact_match"])
         self.assertFalse(result["details"]["C2"]["is_concave"])
         self.assertFalse(result["details"]["C3"]["is_concave"])
         self.assertFalse(result["details"]["C4"]["is_concave"])
 
     def test_cs2_stage(self):
-        # CS2: C2 concave, C3 & C4 flat. C3 & C4 are trapezoidal
+        # Table 2: CS2 -> C2=1, C3=0, C4=0, C3=Trapezoidal, C4=Trapezoidal
         c2 = self.helper_make_c2(concave=True)
         c3 = self.helper_make_c3c4(concave=False, shape="Trapezoidal")
         c4 = self.helper_make_c3c4(concave=False, shape="Trapezoidal")
@@ -164,25 +215,27 @@ class TestCVMStaging(unittest.TestCase):
         cvm_input = CVMInput(c2, c3, c4)
         result = classify_cvm_stage(cvm_input)
         self.assertEqual(result["stage"], "CS2")
+        self.assertTrue(result["details"]["table_2_exact_match"])
         self.assertTrue(result["details"]["C2"]["is_concave"])
         self.assertFalse(result["details"]["C3"]["is_concave"])
         self.assertFalse(result["details"]["C4"]["is_concave"])
 
     def test_cs3_stage(self):
-        # CS3: C2 & C3 concave, C4 flat. C3 & C4 are rectangular horizontal
+        # Table 2: CS3 -> C2=1, C3=1, C4=0, C3=Rect. Horizontal, C4=Trapezoidal
         c2 = self.helper_make_c2(concave=True)
         c3 = self.helper_make_c3c4(concave=True, shape="Rectangular Horizontal")
-        c4 = self.helper_make_c3c4(concave=False, shape="Rectangular Horizontal")
+        c4 = self.helper_make_c3c4(concave=False, shape="Trapezoidal")
         
         cvm_input = CVMInput(c2, c3, c4)
         result = classify_cvm_stage(cvm_input)
         self.assertEqual(result["stage"], "CS3")
+        self.assertTrue(result["details"]["table_2_exact_match"])
         self.assertTrue(result["details"]["C2"]["is_concave"])
         self.assertTrue(result["details"]["C3"]["is_concave"])
         self.assertFalse(result["details"]["C4"]["is_concave"])
 
     def test_cs4_stage(self):
-        # CS4: C2, C3, C4 all concave. C3 & C4 are rectangular horizontal
+        # Table 2: CS4 -> C2=1, C3=1, C4=1, C3=Rect. Horizontal, C4=Rect. Horizontal
         c2 = self.helper_make_c2(concave=True)
         c3 = self.helper_make_c3c4(concave=True, shape="Rectangular Horizontal")
         c4 = self.helper_make_c3c4(concave=True, shape="Rectangular Horizontal")
@@ -190,14 +243,24 @@ class TestCVMStaging(unittest.TestCase):
         cvm_input = CVMInput(c2, c3, c4)
         result = classify_cvm_stage(cvm_input)
         self.assertEqual(result["stage"], "CS4")
+        self.assertTrue(result["details"]["table_2_exact_match"])
         self.assertTrue(result["details"]["C2"]["is_concave"])
         self.assertTrue(result["details"]["C3"]["is_concave"])
         self.assertTrue(result["details"]["C4"]["is_concave"])
-        self.assertEqual(result["details"]["C3"]["shape_metrics"]["shape"], "Rectangular Horizontal")
-        self.assertEqual(result["details"]["C4"]["shape_metrics"]["shape"], "Rectangular Horizontal")
 
     def test_cs5_stage(self):
-        # CS5: C2, C3, C4 all concave. At least one of C3 & C4 is square
+        # Table 2: CS5 -> C2=1, C3=1, C4=1, C3=Square, C4=Square
+        c2 = self.helper_make_c2(concave=True)
+        c3 = self.helper_make_c3c4(concave=True, shape="Square")
+        c4 = self.helper_make_c3c4(concave=True, shape="Square")
+        
+        cvm_input = CVMInput(c2, c3, c4)
+        result = classify_cvm_stage(cvm_input)
+        self.assertEqual(result["stage"], "CS5")
+        self.assertTrue(result["details"]["table_2_exact_match"])
+
+    def test_cs5_stage_transitional(self):
+        # Transitional CS5: C2=1, C3=1, C4=1, C3=Square, C4=Rectangular Horizontal
         c2 = self.helper_make_c2(concave=True)
         c3 = self.helper_make_c3c4(concave=True, shape="Square")
         c4 = self.helper_make_c3c4(concave=True, shape="Rectangular Horizontal")
@@ -205,16 +268,21 @@ class TestCVMStaging(unittest.TestCase):
         cvm_input = CVMInput(c2, c3, c4)
         result = classify_cvm_stage(cvm_input)
         self.assertEqual(result["stage"], "CS5")
-        
-        # Test other vertebra being square
-        c3_alt = self.helper_make_c3c4(concave=True, shape="Rectangular Horizontal")
-        c4_alt = self.helper_make_c3c4(concave=True, shape="Square")
-        cvm_input_alt = CVMInput(c2, c3_alt, c4_alt)
-        result_alt = classify_cvm_stage(cvm_input_alt)
-        self.assertEqual(result_alt["stage"], "CS5")
+        self.assertFalse(result["details"]["table_2_exact_match"])
 
     def test_cs6_stage(self):
-        # CS6: C2, C3, C4 all concave. At least one of C3 & C4 is rectangular vertical
+        # Table 2: CS6 -> C2=1, C3=1, C4=1, C3=Rect. Vertical, C4=Rect. Vertical
+        c2 = self.helper_make_c2(concave=True)
+        c3 = self.helper_make_c3c4(concave=True, shape="Rectangular Vertical")
+        c4 = self.helper_make_c3c4(concave=True, shape="Rectangular Vertical")
+        
+        cvm_input = CVMInput(c2, c3, c4)
+        result = classify_cvm_stage(cvm_input)
+        self.assertEqual(result["stage"], "CS6")
+        self.assertTrue(result["details"]["table_2_exact_match"])
+
+    def test_cs6_stage_transitional(self):
+        # Transitional CS6: C2=1, C3=1, C4=1, C3=Rect. Vertical, C4=Square
         c2 = self.helper_make_c2(concave=True)
         c3 = self.helper_make_c3c4(concave=True, shape="Rectangular Vertical")
         c4 = self.helper_make_c3c4(concave=True, shape="Square")
@@ -222,6 +290,7 @@ class TestCVMStaging(unittest.TestCase):
         cvm_input = CVMInput(c2, c3, c4)
         result = classify_cvm_stage(cvm_input)
         self.assertEqual(result["stage"], "CS6")
+        self.assertFalse(result["details"]["table_2_exact_match"])
 
 
 if __name__ == "__main__":

@@ -49,22 +49,31 @@ def format_results_to_html(result: dict) -> str:
     """
 
     # C2 Vertebra Card
+    c2 = details["C2"]
     c2_concave_status = (
-        "<span style='color: #DD6B20; font-weight: 700;'>Concave</span>"
-        if details["C2"]["is_concave"]
+        "<span style='color: #DD6B20; font-weight: 700;'>Concave (Notch)</span>"
+        if c2["is_concave"]
         else "Flat"
     )
+    s_calib = details.get("spatial_calibration_mm_per_px", 0.375)
+    th_depth_mm = details.get("concavity_threshold_mm", 1.0)
+    exact_match_badge = (
+        "<div style='margin-top: 6px; display: inline-block; background-color: rgba(255,255,255,0.2); padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 600;'>Table 2 Exact Rule Match</div>"
+        if details.get("table_2_exact_match")
+        else ""
+    )
+
     html += f"""
             <div style="background-color: #F8FAFC; border-left: 5px solid #FF7F50; padding: 15px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); border-top: 1px solid #EDF2F7; border-right: 1px solid #EDF2F7; border-bottom: 1px solid #EDF2F7;">
                 <div style="color: #FF7F50; font-weight: 700; font-size: 15px; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.5px;">Vertebra C2 (Axis)</div>
                 <table style="width: 100%; border-collapse: collapse; font-size: 13.5px; color: #4A5568;">
                     <tr style="border-bottom: 1px solid #E2E8F0;">
                         <td style="padding: 6px 0; font-weight: 600; width: 65%;">Inferior Concavity Depth:</td>
-                        <td style="padding: 6px 0; text-align: right; font-family: monospace;">{details["C2"]["concavity_depth"]:.2f} px</td>
+                        <td style="padding: 6px 0; text-align: right; font-family: monospace;">{c2['concavity_depth_px']:.2f} px ({c2['concavity_depth_mm']:.2f} mm)</td>
                     </tr>
                     <tr style="border-bottom: 1px solid #E2E8F0;">
-                        <td style="padding: 6px 0; font-weight: 600;">Inferior Concavity Ratio:</td>
-                        <td style="padding: 6px 0; text-align: right; font-family: monospace;">{details["C2"]["concavity_ratio"]:.3f}</td>
+                        <td style="padding: 6px 0; font-weight: 600;">Concavity Threshold:</td>
+                        <td style="padding: 6px 0; text-align: right; font-family: monospace;">{th_depth_mm:.1f} mm (S = {s_calib:.3f} mm/px)</td>
                     </tr>
                     <tr>
                         <td style="padding: 6px 0; font-weight: 600;">Classification Status:</td>
@@ -79,7 +88,7 @@ def format_results_to_html(result: dict) -> str:
         v_data = details[vert_id]
         sh = v_data["shape_metrics"]
         v_concave_status = (
-            f"<span style='color: {vert_color}; font-weight: 700;'>Concave</span>"
+            f"<span style='color: {vert_color}; font-weight: 700;'>Concave (Notch)</span>"
             if v_data["is_concave"]
             else "Flat"
         )
@@ -89,20 +98,24 @@ def format_results_to_html(result: dict) -> str:
                 <div style="color: {vert_color}; font-weight: 700; font-size: 15px; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.5px;">Vertebra {vert_id}</div>
                 <table style="width: 100%; border-collapse: collapse; font-size: 13.5px; color: #4A5568;">
                     <tr style="border-bottom: 1px solid #E2E8F0;">
-                        <td style="padding: 6px 0; font-weight: 600; width: 65%;">Inferior Concavity Ratio:</td>
-                        <td style="padding: 6px 0; text-align: right; font-family: monospace;">{v_data["concavity_ratio"]:.3f} ({v_concave_status})</td>
+                        <td style="padding: 6px 0; font-weight: 600; width: 65%;">Inferior Concavity Depth:</td>
+                        <td style="padding: 6px 0; text-align: right; font-family: monospace;">{v_data['concavity_depth_px']:.2f} px ({v_data['concavity_depth_mm']:.2f} mm)</td>
                     </tr>
                     <tr style="border-bottom: 1px solid #E2E8F0;">
-                        <td style="padding: 6px 0; font-weight: 600;">Width-to-Height Ratio:</td>
-                        <td style="padding: 6px 0; text-align: right; font-family: monospace;">{sh["wh_ratio"]:.3f}</td>
+                        <td style="padding: 6px 0; font-weight: 600;">Notch Status:</td>
+                        <td style="padding: 6px 0; text-align: right;">{v_concave_status}</td>
                     </tr>
                     <tr style="border-bottom: 1px solid #E2E8F0;">
-                        <td style="padding: 6px 0; font-weight: 600;">Tapering Ratio (Ha/Hp):</td>
-                        <td style="padding: 6px 0; text-align: right; font-family: monospace;">{sh["taper_ratio"]:.3f}</td>
+                        <td style="padding: 6px 0; font-weight: 600;">Shape Index SI (Ha+Hp)/(Ws+Wi):</td>
+                        <td style="padding: 6px 0; text-align: right; font-family: monospace;">{sh['shape_index']:.3f}</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid #E2E8F0;">
+                        <td style="padding: 6px 0; font-weight: 600;">Taper Ratio TR (Ha/Hp):</td>
+                        <td style="padding: 6px 0; text-align: right; font-family: monospace;">{sh['taper_ratio']:.3f}</td>
                     </tr>
                     <tr>
                         <td style="padding: 6px 0; font-weight: 700; color: #2D3748; font-size: 14.5px;">Classified Shape:</td>
-                        <td style="padding: 6px 0; text-align: right; font-weight: 800; color: #2D3748; font-size: 14.5px;">{sh["shape"]}</td>
+                        <td style="padding: 6px 0; text-align: right; font-weight: 800; color: #2D3748; font-size: 14.5px;">{sh['shape']}</td>
                     </tr>
                 </table>
             </div>
@@ -117,10 +130,12 @@ def format_results_to_html(result: dict) -> str:
 
 def predict_cvm(
     image: Image.Image,
-    threshold_concavity: float,
+    calibration_s: float,
+    threshold_concavity_mm: float,
     threshold_taper: float,
-    threshold_horizontal: float,
-    threshold_vertical: float,
+    threshold_trapezoid_si: float,
+    threshold_horizontal_si: float,
+    threshold_vertical_si: float,
 ):
     if image is None:
         return (
@@ -128,13 +143,15 @@ def predict_cvm(
             "<div style='color: red; padding: 10px; font-weight: bold;'>Error: Please upload an image first.</div>",
         )
 
-    # 1. Prepare thresholds
+    # 1. Prepare thresholds from Section 2.5
     thresholds = CVMThresholds(
-        use_absolute_depth=False,
-        concavity_ratio_threshold=threshold_concavity,
-        trapezoid_height_ratio_threshold=threshold_taper,
-        rect_horizontal_threshold=threshold_horizontal,
-        rect_vertical_threshold=threshold_vertical,
+        use_absolute_depth=True,
+        pixel_to_mm=calibration_s,
+        concavity_depth_mm_threshold=threshold_concavity_mm,
+        trapezoid_taper_threshold=threshold_taper,
+        trapezoid_si_threshold=threshold_trapezoid_si,
+        rect_horizontal_si_threshold=threshold_horizontal_si,
+        rect_vertical_si_threshold=threshold_vertical_si,
     )
 
     # 2. Run real model inference and CVM classification
@@ -206,49 +223,67 @@ with gr.Blocks() as demo:
         with gr.Column(scale=5):
             input_image = gr.Image(type="pil", label="Lateral Cephalometric X-ray Image")
 
-            with gr.Accordion(label="CVM Classification Threshold Settings", open=False):
+            with gr.Accordion(label="CVM Classification Threshold Settings (Section 2.5)", open=False):
+                th_calibration = gr.Slider(
+                    minimum=0.10,
+                    maximum=0.80,
+                    step=0.005,
+                    value=0.375,
+                    label="Spatial Calibration Factor S (mm/pixel)",
+                    info="Section 2.5.1 calibration factor (default: 0.375 mm/px)",
+                )
                 th_concavity = gr.Slider(
-                    minimum=0.01,
-                    maximum=0.20,
-                    step=0.01,
-                    value=0.05,
-                    label="Concavity Ratio Threshold",
-                    info="Threshold for inferior border concavity (default 5%)",
+                    minimum=0.20,
+                    maximum=2.50,
+                    step=0.05,
+                    value=1.0,
+                    label="Concavity Depth Threshold (mm)",
+                    info="Physical concavity threshold for notch presence (default: 1.0 mm)",
                 )
                 th_taper = gr.Slider(
-                    minimum=0.50,
-                    maximum=0.99,
-                    step=0.01,
-                    value=0.90,
-                    label="Trapezoid Taper Ratio Threshold",
-                    info="Maximum taper ratio (Ha/Hp) to be classified as Trapezoidal (default 0.90)",
-                )
-                th_horizontal = gr.Slider(
                     minimum=1.00,
                     maximum=1.50,
-                    step=0.05,
-                    value=1.20,
-                    label="Rectangular Horizontal Threshold",
-                    info="Minimum width-to-height ratio to be Rectangular Horizontal (default 1.20)",
+                    step=0.01,
+                    value=1.15,
+                    label="Trapezoid Taper Ratio Threshold (TR >= threshold)",
+                    info="Section 2.5.2: TR = Ha/Hp >= 1.15 for Trapezoidal (default: 1.15)",
+                )
+                th_trapezoid_si = gr.Slider(
+                    minimum=0.50,
+                    maximum=0.85,
+                    step=0.01,
+                    value=0.75,
+                    label="Trapezoid Shape Index Threshold (SI <= threshold)",
+                    info="Section 2.5.2: SI <= 0.75 for Trapezoidal (default: 0.75)",
+                )
+                th_horizontal = gr.Slider(
+                    minimum=0.75,
+                    maximum=0.95,
+                    step=0.01,
+                    value=0.85,
+                    label="Rectangular Horizontal SI Threshold (SI <= threshold)",
+                    info="Section 2.5.2: 0.75 < SI <= 0.85 for Rectangular Horizontal (default: 0.85)",
                 )
                 th_vertical = gr.Slider(
-                    minimum=0.60,
-                    maximum=0.95,
-                    step=0.05,
-                    value=0.85,
-                    label="Rectangular Vertical Threshold",
-                    info="Maximum width-to-height ratio to be Rectangular Vertical (default 0.85)",
+                    minimum=1.05,
+                    maximum=1.35,
+                    step=0.01,
+                    value=1.15,
+                    label="Rectangular Vertical SI Threshold (SI >= threshold)",
+                    info="Section 2.5.2: SI >= 1.15 for Rectangular Vertical (default: 1.15)",
                 )
 
             predict_btn = gr.Button("Predict CVM Stage", variant="primary")
 
             # Example panel
             gr.Examples(
-                examples=[[sample_img_path, 0.05, 0.90, 1.20, 0.85]],
+                examples=[[sample_img_path, 0.375, 1.0, 1.15, 0.75, 0.85, 1.15]],
                 inputs=[
                     input_image,
+                    th_calibration,
                     th_concavity,
                     th_taper,
+                    th_trapezoid_si,
                     th_horizontal,
                     th_vertical,
                 ],
@@ -267,8 +302,10 @@ with gr.Blocks() as demo:
         fn=predict_cvm,
         inputs=[
             input_image,
+            th_calibration,
             th_concavity,
             th_taper,
+            th_trapezoid_si,
             th_horizontal,
             th_vertical,
         ],
