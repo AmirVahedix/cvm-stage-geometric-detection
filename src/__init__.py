@@ -8,6 +8,13 @@ from .cvm_calculator import (
     euclidean_distance,
     perpendicular_distance,
 )
+from .model import CephalometricSwinGCN
+from .inference import (
+    CVMPredictor,
+    PredictionResult,
+    LANDMARK_LABELS,
+    draw_landmarks_on_image,
+)
 
 __all__ = [
     "Point",
@@ -18,4 +25,9 @@ __all__ = [
     "classify_cvm_stage",
     "euclidean_distance",
     "perpendicular_distance",
+    "CephalometricSwinGCN",
+    "CVMPredictor",
+    "PredictionResult",
+    "LANDMARK_LABELS",
+    "draw_landmarks_on_image",
 ]

@@ -1,68 +1,63 @@
-from src import CVMInput, classify_cvm_stage
+import os
+import sys
+from pathlib import Path
 
-
-def print_vertebra_details(name: str, data: dict):
-    print(f"\n--- {name} Details ---")
-    print(f"  Inferior Concavity depth: {data['concavity_depth']:.3f} px")
-    print(f"  Inferior Concavity ratio: {data['concavity_ratio']:.3f} (threshold: 0.05)")
-    print(f"  Is Concave?             : {data['is_concave']}")
-    if "shape_metrics" in data:
-        sh = data["shape_metrics"]
-        print(f"  Posterior Height        : {sh['h_posterior']:.3f} px")
-        print(f"  Anterior Height         : {sh['h_anterior']:.3f} px")
-        print(f"  Average Height          : {sh['h_average']:.3f} px")
-        print(f"  Average Width           : {sh['w_average']:.3f} px")
-        print(f"  Tapering ratio (Ha/Hp)  : {sh['taper_ratio']:.3f} (threshold for trapezoid: <=0.90)")
-        print(f"  Width-to-Height ratio   : {sh['wh_ratio']:.3f} (rect horizontal: >=1.20, vertical: <0.85)")
-        print(f"  Vertebral Shape         : {sh['shape']}")
+from src.inference import (
+    CVMPredictor,
+    build_arg_parser,
+    print_cli_report,
+)
+from src.cvm_calculator import CVMThresholds
 
 
 def main():
-    print("=" * 60)
-    print(" CVM STAGE GEOMETRIC DETECTION DEMONSTRATION")
-    print("=" * 60)
+    parser = build_arg_parser()
+    # Make image optional in main.py so running `python main.py` defaults to demo sample_xray.png
+    for action in parser._actions:
+        if action.dest == "image":
+            action.required = False
+            action.default = "sample_xray.png"
 
-    # 1. Simulating landmark predictions for CVM Stage CS3:
-    # - C2 has a concave inferior border
-    # - C3 has a concave inferior border
-    # - C4 has a flat inferior border
-    # - C3 & C4 are rectangular horizontal
-    mock_landmarks_cs3 = {
-        "C2": {
-            "inferior-posterior": (100.0, 200.0),
-            "inferior-concavity": (105.0, 199.2),  # depth = 0.8, ratio = 0.08 (concave)
-            "inferior-anterior": (110.0, 200.0),
-        },
-        "C3": {
-            "inferior-posterior": (98.0, 250.0),
-            "inferior-concavity": (103.0, 249.2),  # depth = 0.8, ratio = 0.08 (concave)
-            "inferior-anterior": (108.0, 250.0),
-            "superior-posterior": (98.0, 244.0),
-            "superior-anterior": (108.0, 244.0),   # width = 10, height = 6 (horizontal)
-        },
-        "C4": {
-            "inferior-posterior": (96.0, 300.0),
-            "inferior-concavity": (101.0, 299.9),  # depth = 0.1, ratio = 0.01 (flat)
-            "inferior-anterior": (106.0, 300.0),
-            "superior-posterior": (96.0, 294.0),
-            "superior-anterior": (106.0, 294.0),   # width = 10, height = 6 (horizontal)
-        }
-    }
+    args = parser.parse_args()
 
-    print("\n[Input] Parsing mock landmark coordinates (CS3 simulated data)...")
-    cvm_input = CVMInput.from_dict(mock_landmarks_cs3)
+    if not os.path.exists(args.image):
+        print(f"Error: Image file not found: {args.image}", file=sys.stderr)
+        sys.exit(1)
 
-    # 2. Perform the classification
-    result = classify_cvm_stage(cvm_input)
+    thresholds = CVMThresholds(
+        concavity_ratio_threshold=args.concavity_threshold,
+        trapezoid_height_ratio_threshold=args.taper_threshold,
+        rect_horizontal_threshold=args.rect_horizontal_threshold,
+        rect_vertical_threshold=args.rect_vertical_threshold,
+    )
 
-    # 3. Print the results
-    print(f"\n[Result] Predicted maturation stage: {result['stage']}")
-    
-    details = result["details"]
-    print_vertebra_details("C2", details["C2"])
-    print_vertebra_details("C3", details["C3"])
-    print_vertebra_details("C4", details["C4"])
-    print("\n" + "=" * 60)
+    print(f"[CVM Detection] Loading model and running inference on: {args.image}...")
+    predictor = CVMPredictor(
+        weights_path=args.weights,
+        device=args.device,
+    )
+
+    result = predictor.predict(
+        image_input=args.image,
+        thresholds=thresholds,
+        annotate=bool(args.output_image) or not args.quiet,
+        draw_labels=args.draw_labels,
+    )
+
+    if args.quiet:
+        print(result.stage)
+    else:
+        print_cli_report(result, image_path=args.image)
+
+    if args.output_image and result.annotated_image:
+        result.annotated_image.save(args.output_image)
+        print(f"[Saved] Visualized landmarks saved to: {args.output_image}")
+
+    if args.output_json:
+        import json
+        with open(args.output_json, "w") as f:
+            json.dump(result.to_dict(), f, indent=2)
+        print(f"[Saved] JSON metrics saved to: {args.output_json}")
 
 
 if __name__ == "__main__":
