@@ -1,4 +1,4 @@
-from src.cvm.cvm_calculator import (
+from .cvm_calculator import (
     Point,
     VertebraC2,
     VertebraC3C4,

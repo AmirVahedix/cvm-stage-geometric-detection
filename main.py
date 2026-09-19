@@ -1,4 +1,4 @@
-from src.cvm import CVMInput, classify_cvm_stage
+from src import CVMInput, classify_cvm_stage
 
 
 def print_vertebra_details(name: str, data: dict):

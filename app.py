@@ -3,7 +3,7 @@ import math
 from PIL import Image, ImageDraw
 import gradio as gr
 
-from src.cvm.cvm_calculator import (
+from src.cvm_calculator import (
     CVMInput,
     CVMThresholds,
     classify_cvm_stage,

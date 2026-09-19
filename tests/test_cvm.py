@@ -1,5 +1,5 @@
 import unittest
-from src.cvm.cvm_calculator import (
+from src.cvm_calculator import (
     Point,
     VertebraC2,
     VertebraC3C4,
