@@ -1,5 +1,5 @@
 import os
-from PIL import Image, ImageDraw
+from PIL import Image
 import gradio as gr
 
 from src.cvm_calculator import CVMThresholds
@@ -172,23 +172,6 @@ def predict_cvm(
 
 # --- Build Gradio Interface ---
 
-def create_sample_cephalometric():
-    img = Image.new("RGB", (600, 800), color=(20, 24, 33))
-    draw = ImageDraw.Draw(img)
-    draw.arc([50, 50, 450, 450], start=180, end=360, fill=(45, 55, 72), width=3)
-    draw.line([(50, 250), (30, 280), (70, 310)], fill=(45, 55, 72), width=3)
-    draw.line([(70, 310), (100, 380), (250, 420), (350, 350)], fill=(45, 55, 72), width=3)
-    draw.rectangle([250, 200, 360, 240], outline=(35, 40, 50), width=2)
-    draw.rectangle([240, 350, 360, 430], outline=(35, 40, 50), width=2)
-    draw.rectangle([230, 500, 360, 600], outline=(35, 40, 50), width=2)
-    return img
-
-
-sample_img_path = "sample_xray.png"
-if not os.path.exists(sample_img_path):
-    sample_img = create_sample_cephalometric()
-    sample_img.save(sample_img_path)
-
 custom_css = """
 footer {visibility: hidden}
 .gradio-container {
@@ -275,20 +258,6 @@ with gr.Blocks() as demo:
 
             predict_btn = gr.Button("Predict CVM Stage", variant="primary")
 
-            # Example panel
-            gr.Examples(
-                examples=[[sample_img_path, 0.375, 1.0, 1.15, 0.75, 0.85, 1.15]],
-                inputs=[
-                    input_image,
-                    th_calibration,
-                    th_concavity,
-                    th_taper,
-                    th_trapezoid_si,
-                    th_horizontal,
-                    th_vertical,
-                ],
-                label="Quick Demo Sample",
-            )
 
         # Right column: Visualization and Detailed Breakdown Report
         with gr.Column(scale=6):

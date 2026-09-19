@@ -9,3 +9,10 @@ wheels/
 # Virtual environments
 .venv
 *.pth
+.env
+*.txt
+*.jpg
+*.png
+*.json
+.DS_Store
+*.zip
