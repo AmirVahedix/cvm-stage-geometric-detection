@@ -1,4 +1,14 @@
-from src.cvm import CVMInput, classify_cvm_stage
+"""
+Demonstration of CVM Stage Classification comparing:
+1. Proposed Symbolic Clinical Geometric Rules
+2. Model 4: Ablation Variant (iii) (-Symbolic, Replaced Rules with MLP)
+"""
+
+from src.cvm import (
+    CVMInput,
+    classify_cvm_stage,
+    classify_cvm_stage_mlp,
+)
 
 
 def print_vertebra_details(name: str, data: dict):
@@ -18,15 +28,13 @@ def print_vertebra_details(name: str, data: dict):
 
 
 def main():
-    print("=" * 60)
-    print(" CVM STAGE GEOMETRIC DETECTION DEMONSTRATION")
-    print("=" * 60)
+    print("=" * 75)
+    print(" CVM STAGE CLASSIFICATION DEMONSTRATION & ABLATION STUDY")
+    print(" Comparing: Clinical Geometric Rules vs. Ablation Variant (iii) (MLP)")
+    print("=" * 75)
 
-    # 1. Simulating landmark predictions for CVM Stage CS3:
-    # - C2 has a concave inferior border
-    # - C3 has a concave inferior border
-    # - C4 has a flat inferior border
-    # - C3 & C4 are rectangular horizontal
+    # 1. Simulating landmark predictions from Model 1 for CVM Stage CS3:
+    # 13 points (26 coordinate numbers)
     mock_landmarks_cs3 = {
         "C2": {
             "inferior-posterior": (100.0, 200.0),
@@ -46,23 +54,47 @@ def main():
             "inferior-anterior": (106.0, 300.0),
             "superior-posterior": (96.0, 294.0),
             "superior-anterior": (106.0, 294.0),   # width = 10, height = 6 (horizontal)
-        }
+        },
     }
 
-    print("\n[Input] Parsing mock landmark coordinates (CS3 simulated data)...")
+    print("\n[Input] Parsing Model 1 landmark coordinates (13 points, 26 numbers)...")
     cvm_input = CVMInput.from_dict(mock_landmarks_cs3)
+    flat_coords = cvm_input.to_flat_coords()
+    print(f"  -> Extracted 26 coordinates: {flat_coords[:6]} ... (total {len(flat_coords)})")
 
-    # 2. Perform the classification
-    result = classify_cvm_stage(cvm_input)
+    # -------------------------------------------------------------
+    # Method 1: Proposed Framework (Clinical Geometric Rules)
+    # -------------------------------------------------------------
+    print("\n" + "-" * 75)
+    print(" [1] Running Symbolic Clinical Geometric Rules...")
+    result_rules = classify_cvm_stage(cvm_input, method="rules")
+    print(f"  -> Method           : {result_rules.get('method', 'rules')}")
+    print(f"  -> Predicted Stage  : {result_rules['stage']}")
 
-    # 3. Print the results
-    print(f"\n[Result] Predicted maturation stage: {result['stage']}")
-    
-    details = result["details"]
+    details = result_rules["details"]
     print_vertebra_details("C2", details["C2"])
     print_vertebra_details("C3", details["C3"])
     print_vertebra_details("C4", details["C4"])
-    print("\n" + "=" * 60)
+
+    # -------------------------------------------------------------
+    # Method 2: Ablation Variant (iii) (Redirecting coords to MLP)
+    # -------------------------------------------------------------
+    print("\n" + "-" * 75)
+    print(" [2] Running Ablation Variant (iii) (Redirecting output to 2-layer MLP)...")
+    result_mlp = classify_cvm_stage(cvm_input, method="mlp")
+    print(f"  -> Method           : {result_mlp['method']} ({result_mlp['details']['model_architecture']})")
+    print(f"  -> Predicted Stage  : {result_mlp['stage']}")
+    print(f"  -> Confidence       : {result_mlp['confidence'] * 100.0:.2f}%")
+    print("  -> Class Probability Distribution:")
+    for stg, prob in result_mlp["probabilities"].items():
+        bar = "█" * int(prob * 30)
+        print(f"     {stg}: {prob * 100.0:5.1f}% | {bar}")
+
+    print("\n" + "=" * 75)
+    print(f" SUMMARY COMPARISON:")
+    print(f"  - Hard Geometric Rules  : {result_rules['stage']}")
+    print(f"  - MLP Classifier        : {result_mlp['stage']} (Confidence: {result_mlp['confidence']*100:.1f}%)")
+    print("=" * 75 + "\n")
 
 
 if __name__ == "__main__":

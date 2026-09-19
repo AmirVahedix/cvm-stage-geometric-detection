@@ -1,6 +1,6 @@
 import math
 from dataclasses import dataclass
-from typing import Dict, Any, Optional, Tuple, Union
+from typing import Dict, Any, Optional, Tuple, Union, List
 
 
 @dataclass
@@ -72,6 +72,28 @@ class CVMInput:
             c3=VertebraC3C4.from_dict(data['C3']),
             c4=VertebraC3C4.from_dict(data['C4']),
         )
+
+    def to_list(self) -> List[Tuple[float, float]]:
+        """Returns the 13 landmarks in standard clinical order."""
+        return [
+            self.c2.inferior_posterior.to_tuple(),
+            self.c2.inferior_concavity.to_tuple(),
+            self.c2.inferior_anterior.to_tuple(),
+            self.c3.superior_posterior.to_tuple(),
+            self.c3.superior_anterior.to_tuple(),
+            self.c3.inferior_posterior.to_tuple(),
+            self.c3.inferior_concavity.to_tuple(),
+            self.c3.inferior_anterior.to_tuple(),
+            self.c4.superior_posterior.to_tuple(),
+            self.c4.superior_anterior.to_tuple(),
+            self.c4.inferior_posterior.to_tuple(),
+            self.c4.inferior_concavity.to_tuple(),
+            self.c4.inferior_anterior.to_tuple(),
+        ]
+
+    def to_flat_coords(self) -> List[float]:
+        """Returns the 26 coordinate numbers (x, y) flattened."""
+        return [coord for pt in self.to_list() for coord in pt]
 
 
 @dataclass
@@ -184,20 +206,34 @@ def calculate_shape(
 
 
 def classify_cvm_stage(
-    input_data: CVMInput, thresholds: Optional[CVMThresholds] = None
+    input_data: Union[CVMInput, Dict[str, Any], Any],
+    thresholds: Optional[CVMThresholds] = None,
+    method: str = "rules",
+    mlp_model: Optional[Any] = None,
+    mlp_weights_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Classifies the Cervical Vertebral Maturation (CVM) stage (CS1-CS6) based on 13 landmarks.
     
     Args:
-        input_data: CVMInput containing the landmark points for C2, C3, and C4.
-        thresholds: Configuration parameters for CVM classification. If None, default thresholds are used.
+        input_data: CVMInput containing the landmark points for C2, C3, and C4 (or raw landmark dictionary / array).
+        thresholds: Configuration parameters for CVM classification when using geometric rules.
+        method: Staging engine method. 'rules' (default) uses clinical geometric rules;
+                'mlp' redirects model coordinates to the lightweight 2-layer MLP classifier
+                (Ablation Variant iii: -Symbolic, Replaced Rules with MLP).
+        mlp_model: Optional pre-loaded CVMStageMLP instance when method='mlp'.
+        mlp_weights_path: Optional path to MLP checkpoint weights when method='mlp'.
         
     Returns:
         A dictionary containing:
             - 'stage': The predicted CVM stage (string, e.g., 'CS1' to 'CS6').
-            - 'details': Detailed metrics and classifications for C2, C3, and C4.
+            - 'method': 'rules' or 'mlp'.
+            - 'details': Detailed metrics and classifications for C2, C3, and C4 (or MLP details).
     """
+    if method.lower() == "mlp":
+        from src.cvm.mlp import classify_cvm_stage_mlp
+        return classify_cvm_stage_mlp(input_data, model=mlp_model, weights_path=mlp_weights_path)
+
     if thresholds is None:
         thresholds = CVMThresholds()
 
@@ -316,5 +352,6 @@ def classify_cvm_stage(
 
     return {
         "stage": stage,
+        "method": "rules",
         "details": details,
     }

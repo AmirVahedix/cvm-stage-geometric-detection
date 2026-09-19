@@ -6,5 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "gradio",
+    "scikit-learn>=1.9.1",
+    "torch>=2.14.0",
 ]
 

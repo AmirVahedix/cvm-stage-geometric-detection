@@ -7,8 +7,9 @@ from src.cvm.cvm_calculator import (
     CVMInput,
     CVMThresholds,
     classify_cvm_stage,
-    Point
+    Point,
 )
+from src.cvm.mlp import CVM_STAGE_NAMES
 
 def generate_mock_landmarks(W: float, H: float, stage: str) -> dict:
     """
@@ -19,10 +20,6 @@ def generate_mock_landmarks(W: float, H: float, stage: str) -> dict:
     w = W * 0.18  # vertebra width
     
     # Configure variables for the target CVM stage
-    # C2 Concavity: flat (0.01) or concave (0.08)
-    # C3 Concavity: flat (0.01) or concave (0.08)
-    # C4 Concavity: flat (0.01) or concave (0.08)
-    # C3 Shape / C4 Shape: "Trapezoidal", "Rectangular Horizontal", "Square", "Rectangular Vertical"
     if stage == "CS1":
         c2_concave = 0.01
         c3_concave = 0.01
@@ -72,9 +69,7 @@ def generate_mock_landmarks(W: float, H: float, stage: str) -> dict:
     y4_center = H * 0.74
 
     def get_vertebra_points(y_center, shape, concavity_ratio):
-        # Calculate heights based on shape class
         if shape == "Trapezoidal":
-            # posterior height = w/1.3, anterior height = 0.75 * posterior height
             h_post = w / 1.3
             h_ant = 0.75 * h_post
         elif shape == "Rectangular Horizontal":
@@ -96,7 +91,6 @@ def generate_mock_landmarks(W: float, H: float, stage: str) -> dict:
         ip = (cx - w/2, y_bot_post)
         ia = (cx + w/2, y_bot_ant)
 
-        # concavity point calculation using normal vector
         dx = ia[0] - ip[0]
         dy = ia[1] - ip[1]
         base_len = math.sqrt(dx**2 + dy**2)
@@ -105,8 +99,6 @@ def generate_mock_landmarks(W: float, H: float, stage: str) -> dict:
         mid_x = (ip[0] + ia[0]) / 2
         mid_y = (ip[1] + ia[1]) / 2
 
-        # normal vector pointing upwards (y starts at top, so upward is -y)
-        # to guarantee upward bending, we adjust sign using dx
         ic_x = mid_x + depth * (dy / base_len)
         ic_y = mid_y - depth * (dx / base_len)
         ic = (ic_x, ic_y)
@@ -145,13 +137,11 @@ def draw_landmarks(image: Image.Image, landmarks: dict) -> Image.Image:
     draw = ImageDraw.Draw(annotated)
     W, H = image.size
 
-    # Responsive scaling for lines and dots
     line_w = max(2, int(min(W, H) * 0.006))
     dot_r = max(4, int(min(W, H) * 0.009))
 
-    # Distinct colors matching the dashboard border
     c2_color = (255, 127, 80)   # Coral
-    c3_color = (32, 178, 170)   # Teal / Light Sea Green
+    c3_color = (32, 178, 170)   # Teal
     c4_color = (65, 105, 225)   # Royal Blue
 
     c2 = landmarks["C2"]
@@ -183,11 +173,9 @@ def draw_landmarks(image: Image.Image, landmarks: dict) -> Image.Image:
     ]
     draw.line(c4_outline, fill=c4_color, width=line_w)
 
-    # Helper function to draw circles
     def draw_dot(pt, color):
         draw.ellipse([pt[0] - dot_r, pt[1] - dot_r, pt[0] + dot_r, pt[1] + dot_r], fill=color, outline=(255, 255, 255), width=1)
 
-    # Draw landmarks
     for pt in c2.values():
         draw_dot(pt, c2_color)
     for pt in c3.values():
@@ -199,10 +187,11 @@ def draw_landmarks(image: Image.Image, landmarks: dict) -> Image.Image:
 
 def format_results_to_html(result: dict) -> str:
     """
-    Renders a premium HTML dashboard breaking down CVM staging details.
+    Renders a premium HTML dashboard breaking down CVM staging details
+    supporting both Clinical Rules and MLP Classifier (Ablation Variant iii).
     """
     stage = result["stage"]
-    details = result["details"]
+    method = result.get("method", "rules")
 
     stage_desc = {
         "CS1": "The lower borders of all the three vertebrae (C2, C3, and C4) are flat. The bodies of both C3 and C4 are trapezoidal in shape. Peak mandibular growth is expected to occur 2 years after this stage.",
@@ -215,10 +204,66 @@ def format_results_to_html(result: dict) -> str:
 
     desc = stage_desc.get(stage, "Unknown CVM Stage")
 
+    # If predicted via MLP Classifier (Ablation Variant iii)
+    if method == "mlp":
+        confidence = result.get("confidence", 0.0) * 100.0
+        probabilities = result.get("probabilities", {})
+        details = result.get("details", {})
+
+        html = f"""
+        <div style="font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; padding: 5px;">
+            <div style="background: linear-gradient(135deg, #0284C7, #2563EB); color: white; padding: 20px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.15);">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div style="font-size: 12px; text-transform: uppercase; letter-spacing: 1.5px; opacity: 0.85; font-weight: 600;">
+                        Ablation Variant (iii) | -Symbolic (MLP)
+                    </div>
+                    <div style="background: rgba(255,255,255,0.2); padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: 700;">
+                        Confidence: {confidence:.1f}%
+                    </div>
+                </div>
+                <h2 style="margin: 8px 0 0 0; font-size: 34px; font-weight: 800; letter-spacing: 0.5px;">{stage}</h2>
+                <p style="margin: 12px 0 0 0; font-size: 13.5px; opacity: 0.95; line-height: 1.5; font-weight: 400;">{desc}</p>
+            </div>
+            
+            <h3 style="color: #1A202C; margin-bottom: 12px; font-size: 18px; border-bottom: 2px solid #E2E8F0; padding-bottom: 6px; font-weight: 700;">
+                MLP Class Probability Distribution
+            </h3>
+            
+            <div style="background-color: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);">
+        """
+        for stg in CVM_STAGE_NAMES:
+            prob = probabilities.get(stg, 0.0) * 100.0
+            is_winner = (stg == stage)
+            bar_color = "#2563EB" if is_winner else "#94A3B8"
+            font_weight = "700" if is_winner else "500"
+            html += f"""
+                <div style="margin-bottom: 10px;">
+                    <div style="display: flex; justify-content: space-between; font-size: 13px; font-weight: {font_weight}; margin-bottom: 4px; color: #334155;">
+                        <span>{stg}</span>
+                        <span>{prob:.1f}%</span>
+                    </div>
+                    <div style="background-color: #E2E8F0; border-radius: 4px; height: 8px; width: 100%; overflow: hidden;">
+                        <div style="background-color: {bar_color}; height: 100%; width: {prob:.1f}%; border-radius: 4px;"></div>
+                    </div>
+                </div>
+            """
+
+        html += f"""
+            </div>
+            <div style="background-color: #EFF6FF; border-left: 4px solid #3B82F6; padding: 12px 14px; border-radius: 6px; font-size: 12.5px; color: #1E40AF; line-height: 1.5;">
+                <strong>Ablation Architecture:</strong> {details.get('model_architecture', '2-layer MLP (26 -> 64 -> 6)')}<br/>
+                <strong>Mechanism:</strong> Redirects the 13 (x,y) landmark coordinates directly to the MLP instead of evaluating clinical concavity and shape geometric rules (Row 4 of Table 7).
+            </div>
+        </div>
+        """
+        return html
+
+    # Default: Clinical Geometric Rules breakdown
+    details = result["details"]
     html = f"""
     <div style="font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; padding: 5px;">
         <div style="background: linear-gradient(135deg, #4A00E0, #8E2DE2); color: white; padding: 20px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(0,0,0,0.15);">
-            <div style="font-size: 12px; text-transform: uppercase; letter-spacing: 1.5px; opacity: 0.8; font-weight: 600;">Prediction Result</div>
+            <div style="font-size: 12px; text-transform: uppercase; letter-spacing: 1.5px; opacity: 0.8; font-weight: 600;">Proposed Symbolic Geometric Rules</div>
             <h2 style="margin: 5px 0 0 0; font-size: 32px; font-weight: 800; letter-spacing: 0.5px;">{stage}</h2>
             <p style="margin: 12px 0 0 0; font-size: 14px; opacity: 0.95; line-height: 1.6; font-weight: 500;">{desc}</p>
         </div>
@@ -289,6 +334,7 @@ def format_results_to_html(result: dict) -> str:
 def predict_cvm(
     image: Image.Image,
     target_stage: str,
+    engine_choice: str,
     threshold_concavity: float,
     threshold_taper: float,
     threshold_horizontal: float,
@@ -315,8 +361,9 @@ def predict_cvm(
     # 4. Parse landmarks into CVMInput
     cvm_input = CVMInput.from_dict(landmarks)
     
-    # 5. Run classification rules
-    result = classify_cvm_stage(cvm_input, thresholds=thresholds)
+    # 5. Run classification (either symbolic rules or redirecting to MLP)
+    method = "mlp" if "MLP" in engine_choice else "rules"
+    result = classify_cvm_stage(cvm_input, thresholds=thresholds, method=method)
     
     # 6. Plot landmarks on image
     annotated_image = draw_landmarks(image, landmarks)
@@ -329,21 +376,14 @@ def predict_cvm(
 
 # --- Build Gradio Interface ---
 
-# We can create a default mock cephalometric image using PIL to make the demo self-contained
 def create_sample_cephalometric():
-    # Create a nice dark gray background lateral head/neck contour mock
     img = Image.new("RGB", (600, 800), color=(20, 24, 33))
     draw = ImageDraw.Draw(img)
     
-    # Draw a soft white skeleton-like contour to simulate X-ray
-    # Head contour
     draw.arc([50, 50, 450, 450], start=180, end=360, fill=(45, 55, 72), width=3)
-    # Nose profile
     draw.line([(50, 250), (30, 280), (70, 310)], fill=(45, 55, 72), width=3)
-    # Jaw outline
     draw.line([(70, 310), (100, 380), (250, 420), (350, 350)], fill=(45, 55, 72), width=3)
     
-    # Cervical Vertebrae soft background guides
     draw.rectangle([250, 200, 360, 240], outline=(35, 40, 50), width=2) # C2
     draw.rectangle([240, 350, 360, 430], outline=(35, 40, 50), width=2) # C3
     draw.rectangle([230, 500, 360, 600], outline=(35, 40, 50), width=2) # C4
@@ -376,8 +416,8 @@ with gr.Blocks() as demo:
             <h1 style="font-size: 34px; font-weight: 800; margin: 0; background: linear-gradient(to right, #818CF8, #C084FC); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
                 Cervical Vertebral Maturation (CVM) Stage Classifier
             </h1>
-            <p style="font-size: 16px; color: #94A3B8; margin-top: 8px; max-width: 650px; margin-left: auto; margin-right: auto;">
-                Upload a lateral cephalometric X-ray image to automatically predict the skeletal maturation stage using cervical vertebrae landmarks.
+            <p style="font-size: 15px; color: #94A3B8; margin-top: 8px; max-width: 700px; margin-left: auto; margin-right: auto;">
+                Interactive demonstration and ablation study comparing <strong>Symbolic Clinical Geometric Rules</strong> against <strong>Model 4: Ablation Variant (iii) (MLP Classifier)</strong>.
             </p>
         </div>
         """
@@ -388,13 +428,23 @@ with gr.Blocks() as demo:
         with gr.Column(scale=5):
             input_image = gr.Image(type="pil", label="Lateral Cephalometric X-ray Image")
             
+            engine_choice = gr.Radio(
+                choices=[
+                    "Clinical Geometric Rules (Proposed)",
+                    "MLP Classifier (Ablation Variant iii: -Symbolic)"
+                ],
+                value="Clinical Geometric Rules (Proposed)",
+                label="Staging Engine / Ablation Mode",
+                info="Switch between clinical geometric rules and redirecting coordinates to the 2-layer MLP classifier."
+            )
+
             target_stage = gr.Dropdown(
                 choices=["CS1", "CS2", "CS3", "CS4", "CS5", "CS6"],
                 value="CS3",
                 label="Simulated Model Checkpoint Stage"
             )
             
-            with gr.Accordion(label="CVM Classification Threshold Settings", open=False):
+            with gr.Accordion(label="CVM Geometric Threshold Settings (for Rules)", open=False):
                 th_concavity = gr.Slider(
                     minimum=0.01, maximum=0.20, step=0.01, value=0.05,
                     label="Concavity Ratio Threshold",
@@ -420,9 +470,12 @@ with gr.Blocks() as demo:
             
             # Example panel
             gr.Examples(
-                examples=[[sample_img_path, "CS3", 0.05, 0.90, 1.20, 0.85]],
-                inputs=[input_image, target_stage, th_concavity, th_taper, th_horizontal, th_vertical],
-                label="Quick Demo Sample"
+                examples=[
+                    [sample_img_path, "CS3", "Clinical Geometric Rules (Proposed)", 0.05, 0.90, 1.20, 0.85],
+                    [sample_img_path, "CS3", "MLP Classifier (Ablation Variant iii: -Symbolic)", 0.05, 0.90, 1.20, 0.85],
+                ],
+                inputs=[input_image, target_stage, engine_choice, th_concavity, th_taper, th_horizontal, th_vertical],
+                label="Quick Demo Samples"
             )
             
         # Right column: Visualization and Detailed Breakdown Report
@@ -436,6 +489,7 @@ with gr.Blocks() as demo:
         inputs=[
             input_image,
             target_stage,
+            engine_choice,
             th_concavity,
             th_taper,
             th_horizontal,
