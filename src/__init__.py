@@ -8,10 +8,10 @@ from .cvm_calculator import (
     euclidean_distance,
     perpendicular_distance,
 )
-from .model import CephalometricSwinGCN
-
-
 def __getattr__(name: str):
+    if name == "CephalometricSwinGCN":
+        from .model import CephalometricSwinGCN
+        return CephalometricSwinGCN
     if name in (
         "CVMPredictor",
         "PredictionResult",

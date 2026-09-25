@@ -10,6 +10,8 @@ from src.cvm_calculator import (
     calculate_concavity,
     calculate_shape,
     classify_cvm_stage,
+    compute_fuzzy_concavity,
+    compute_fuzzy_shape,
 )
 
 
@@ -291,6 +293,78 @@ class TestCVMStaging(unittest.TestCase):
         result = classify_cvm_stage(cvm_input)
         self.assertEqual(result["stage"], "CS6")
         self.assertFalse(result["details"]["table_2_exact_match"])
+
+
+class TestCVMHysteresisAndFuzzy(unittest.TestCase):
+    def test_compute_fuzzy_concavity_states(self):
+        # Threshold 1.0 mm, margin 0.15 mm -> [0.85, 1.15]
+        # Below 0.85 -> definitely_flat, degree 0
+        f_flat = compute_fuzzy_concavity(0.70, 1.0, 0.15)
+        self.assertEqual(f_flat["state"], "definitely_flat")
+        self.assertEqual(f_flat["degree"], 0.0)
+        self.assertTrue(f_flat["is_definite_flat"])
+        self.assertFalse(f_flat["is_transition"])
+
+        # Above 1.15 -> definitely_concave, degree 1
+        f_concave = compute_fuzzy_concavity(1.30, 1.0, 0.15)
+        self.assertEqual(f_concave["state"], "definitely_concave")
+        self.assertEqual(f_concave["degree"], 1.0)
+        self.assertTrue(f_concave["is_definite_concave"])
+
+        # In transition [0.85, 1.15], e.g. 1.0 -> degree ~0.5
+        f_trans = compute_fuzzy_concavity(1.0, 1.0, 0.15)
+        self.assertEqual(f_trans["state"], "transition_zone")
+        self.assertAlmostEqual(f_trans["degree"], 0.5, places=2)
+        self.assertTrue(f_trans["is_transition"])
+
+    def test_compute_fuzzy_shape(self):
+        th = CVMThresholds(enable_fuzzy_hysteresis=True, shape_fuzzy_margin=0.03)
+        # Clearly trapezoid: TR=1.20, SI=0.70
+        f_trap = compute_fuzzy_shape(0.70, 1.20, th)
+        self.assertGreater(f_trap["membership_trapezoidal"], 0.8)
+        self.assertLess(f_trap["membership_rect_horizontal"], 0.2)
+
+        # Clearly rectangular horizontal: TR=1.0, SI=0.80
+        f_rh = compute_fuzzy_shape(0.80, 1.00, th)
+        self.assertGreater(f_rh["membership_rect_horizontal"], 0.7)
+
+    def test_hysteresis_suppresses_spurious_c3_notch_on_flat_c2(self):
+        # Monotonicity test: If C2 is flat (0.2 mm), even if C3 has depth 1.05 mm,
+        # it should NOT trigger CS3; it must remain CS1.
+        ip = Point(0, 0)
+        ia = Point(10, 0)
+        # S = 0.375 mm/px: 0.5 px = 0.1875 mm (flat C2)
+        c2 = VertebraC2(ip, Point(5, 0.5), ia)
+        # C3 depth = 2.8 px * 0.375 = 1.05 mm (in transition zone)
+        sp3 = Point(0, 5)
+        sa3 = Point(10, 5)
+        c3 = VertebraC3C4(ip, Point(5, 2.8), ia, sp3, sa3)
+        c4 = VertebraC3C4(ip, Point(5, 0.5), ia, sp3, sa3)
+
+        cvm_input = CVMInput(c2, c3, c4)
+        th = CVMThresholds(enable_fuzzy_hysteresis=True, strict_biological_hierarchy=True)
+        res = classify_cvm_stage(cvm_input, thresholds=th)
+        self.assertEqual(res["stage"], "CS1")
+        self.assertEqual(res["details"]["effective_notches"]["C3"], 0)
+
+    def test_hysteresis_holds_cs2_when_c3_is_borderline_and_trapezoid(self):
+        # C2 is clearly concave (3.0 px * 0.375 = 1.125 mm)
+        ip = Point(0, 0)
+        ia = Point(10, 0)
+        c2 = VertebraC2(ip, Point(5, 3.5), ia)
+
+        # C3 has borderline concavity 1.02 mm (2.72 px) but shape is firmly Trapezoid
+        sp3 = Point(0, 5)
+        sa3 = Point(10, 5)  # SI = 10/20 = 0.50 (Trapezoid)
+        c3 = VertebraC3C4(ip, Point(5, 2.72), ia, sp3, sa3)
+        c4 = VertebraC3C4(ip, Point(5, 0.5), ia, sp3, sa3)
+
+        cvm_input = CVMInput(c2, c3, c4)
+        th = CVMThresholds(enable_fuzzy_hysteresis=True, concavity_hysteresis_mm=0.15)
+        res = classify_cvm_stage(cvm_input, thresholds=th)
+        # Because C3 shape is Trapezoid and depth is in transition, hysteresis prevents premature CS3
+        self.assertEqual(res["stage"], "CS2")
+        self.assertEqual(res["details"]["effective_notches"]["C3"], 0)
 
 
 if __name__ == "__main__":

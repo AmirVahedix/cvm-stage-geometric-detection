@@ -97,6 +97,13 @@ class CVMThresholds:
     # Rectangular Vertical: SI >= 1.15
     rect_vertical_si_threshold: float = 1.15
 
+    # --- Hysteresis Buffer & Fuzzy Transition Parameters ---
+    enable_fuzzy_hysteresis: bool = True
+    concavity_hysteresis_mm: float = 0.15  # Hysteresis buffer +/- around concavity threshold (e.g. [0.85, 1.15] mm)
+    concavity_ratio_hysteresis: float = 0.015  # Fallback relative buffer for concavity ratio
+    shape_fuzzy_margin: float = 0.03  # Buffer margin for borderline shape ratios (e.g. trapezoid preservation)
+    strict_biological_hierarchy: bool = True  # Monotonic progression (C2 notch precedes C3, C3 precedes C4)
+
     # Backward compatibility aliases
     @property
     def trapezoid_height_ratio_threshold(self) -> float:
@@ -172,6 +179,91 @@ def perpendicular_distance(point: Point, line_start: Point, line_end: Point) -> 
 
 # --- Feature Classification Functions ---
 
+def compute_fuzzy_concavity(
+    depth_val: float,
+    threshold: float,
+    margin: float,
+) -> Dict[str, Any]:
+    """
+    Computes fuzzy membership degree and hysteresis transition state for concavity.
+    Transition zone: [threshold - margin, threshold + margin].
+    Returns:
+        - degree: float in [0.0, 1.0] (0.0 = definitely flat, 1.0 = definitely concave)
+        - state: 'definitely_flat', 'transition_zone', or 'definitely_concave'
+        - is_definite_concave: bool (>= threshold + margin)
+        - is_definite_flat: bool (< threshold - margin)
+        - is_transition: bool (within buffer zone)
+    """
+    low = max(0.0, threshold - margin)
+    high = threshold + margin
+    span = high - low if high > low else 1e-6
+
+    if depth_val <= low:
+        deg = 0.0
+        state = "definitely_flat"
+    elif depth_val >= high:
+        deg = 1.0
+        state = "definitely_concave"
+    else:
+        deg = (depth_val - low) / span
+        state = "transition_zone"
+
+    return {
+        "degree": round(float(deg), 4),
+        "state": state,
+        "is_definite_concave": depth_val >= high,
+        "is_definite_flat": depth_val < low,
+        "is_transition": low <= depth_val < high,
+        "transition_lower": round(float(low), 3),
+        "transition_upper": round(float(high), 3),
+    }
+
+
+def compute_fuzzy_shape(
+    shape_index: float,
+    taper_ratio: float,
+    thresholds: CVMThresholds,
+) -> Dict[str, Any]:
+    """
+    Computes continuous fuzzy membership degrees across the 4 CVM shape categories.
+    """
+    margin = thresholds.shape_fuzzy_margin if thresholds.enable_fuzzy_hysteresis else 0.0
+    tr_th = thresholds.trapezoid_taper_threshold
+    si_trap = thresholds.trapezoid_si_threshold
+
+    # Trapezoidal affinity (tapering or small height-to-width)
+    denom = 2 * margin if margin > 0 else 1e-6
+    mu_tr = max(0.0, min(1.0, (taper_ratio - (tr_th - margin)) / denom)) if margin > 0 else (1.0 if taper_ratio >= tr_th else 0.0)
+    mu_si = max(0.0, min(1.0, ((si_trap + margin) - shape_index) / denom)) if margin > 0 else (1.0 if shape_index <= si_trap else 0.0)
+    mu_trap = max(mu_tr, mu_si)
+
+    # Rectangular horizontal affinity (0.75 < SI <= 0.85)
+    if shape_index <= si_trap - margin or shape_index >= thresholds.square_si_lower:
+        mu_horiz = 0.0
+    else:
+        mu_horiz = max(0.0, min(1.0, 1.0 - abs(shape_index - 0.80) / 0.12))
+
+    # Square affinity (0.90 <= SI <= 1.10)
+    if shape_index <= thresholds.square_si_lower - margin or shape_index >= thresholds.square_si_upper + margin:
+        mu_square = 0.0
+    else:
+        mu_square = max(0.0, min(1.0, 1.0 - abs(shape_index - 1.00) / 0.15))
+
+    # Rectangular vertical affinity (SI >= 1.15)
+    vert_th = thresholds.rect_vertical_si_threshold
+    if shape_index <= vert_th - margin:
+        mu_vert = 0.0
+    else:
+        mu_vert = max(0.0, min(1.0, (shape_index - (vert_th - margin)) / denom)) if margin > 0 else (1.0 if shape_index >= vert_th else 0.0)
+
+    return {
+        "membership_trapezoidal": round(float(mu_trap), 3),
+        "membership_rect_horizontal": round(float(mu_horiz), 3),
+        "membership_square": round(float(mu_square), 3),
+        "membership_rect_vertical": round(float(mu_vert), 3),
+    }
+
+
 def calculate_concavity(
     ip: Point, ic: Point, ia: Point, thresholds: CVMThresholds
 ) -> Tuple[float, float, bool]:
@@ -202,7 +294,7 @@ def calculate_shape(
 ) -> Dict[str, Any]:
     """
     Calculates morphometric dimensions and classifies the shape of a C3/C4 vertebra
-    strictly following Section 2.5.2 of the manuscript.
+    strictly following Section 2.5.2 of the manuscript, with optional fuzzy buffer transitions.
 
     Dimensions:
         H_a = ||p_AS - p_AI||_2 (anterior height)
@@ -233,11 +325,13 @@ def calculate_shape(
     shape_index = (h_anterior + h_posterior) / width_sum if width_sum > 0 else 1.0
     taper_ratio = h_anterior / h_posterior if h_posterior > 0 else 1.0
 
+    margin = thresholds.shape_fuzzy_margin if thresholds.enable_fuzzy_hysteresis else 0.0
+
     # Buffer midpoints computed dynamically from configured thresholds
     buffer_horiz_sq = (thresholds.rect_horizontal_si_threshold + thresholds.square_si_lower) / 2.0  # 0.875
     buffer_sq_vert = (thresholds.square_si_upper + thresholds.rect_vertical_si_threshold) / 2.0    # 1.125
 
-    if taper_ratio >= thresholds.trapezoid_taper_threshold or shape_index <= thresholds.trapezoid_si_threshold:
+    if (taper_ratio >= thresholds.trapezoid_taper_threshold - margin) or (shape_index <= thresholds.trapezoid_si_threshold + margin):
         shape_class = "Trapezoidal"
     elif shape_index <= buffer_horiz_sq:
         shape_class = "Rectangular Horizontal"
@@ -245,6 +339,8 @@ def calculate_shape(
         shape_class = "Square"
     else:
         shape_class = "Rectangular Vertical"
+
+    fuzzy_shape = compute_fuzzy_shape(shape_index, taper_ratio, thresholds)
 
     return {
         "h_posterior": h_posterior,
@@ -259,6 +355,7 @@ def calculate_shape(
         "tr": taper_ratio,
         "wh_ratio": shape_index,  # Shape index is height/width as defined in Section 2.5.2
         "shape": shape_class,
+        "fuzzy_memberships": fuzzy_shape,
     }
 
 
@@ -319,12 +416,63 @@ def classify_cvm_stage(
         thresholds
     )
 
-    # --- Rule Engine for CVM Stage Staging (Section 2.5.3, Table 2) ---
-    n2 = 1 if c2_concave else 0
-    n3 = 1 if c3_concave else 0
-    n4 = 1 if c4_concave else 0
+    s = thresholds.pixel_to_mm if thresholds.pixel_to_mm is not None else 0.375
+    c2_depth_mm = c2_depth * s
+    c3_depth_mm = c3_depth * s
+    c4_depth_mm = c4_depth * s
+
+    th_depth = thresholds.concavity_depth_mm_threshold
+    hyst_mm = thresholds.concavity_hysteresis_mm if thresholds.enable_fuzzy_hysteresis else 0.0
+
+    c2_fuzzy = compute_fuzzy_concavity(c2_depth_mm, th_depth, hyst_mm)
+    c3_fuzzy = compute_fuzzy_concavity(c3_depth_mm, th_depth, hyst_mm)
+    c4_fuzzy = compute_fuzzy_concavity(c4_depth_mm, th_depth, hyst_mm)
+
     shape3 = c3_shape_metrics["shape"]
     shape4 = c4_shape_metrics["shape"]
+
+    # --- Notch Resolution (with Hysteresis & Biological Hierarchy) ---
+    if thresholds.enable_fuzzy_hysteresis:
+        # 1. C2 notch resolution:
+        if c2_depth_mm >= th_depth + hyst_mm:
+            n2 = 1
+        elif c2_depth_mm < th_depth - hyst_mm:
+            n2 = 0
+        else:
+            n2 = 1 if c2_depth_mm >= th_depth else 0
+
+        # 2. C3 notch resolution: requires prior C2 maturity (monotonicity)
+        if thresholds.strict_biological_hierarchy and n2 == 0:
+            n3 = 0
+        elif c3_depth_mm >= th_depth + hyst_mm:
+            n3 = 1
+        elif c3_depth_mm < th_depth - hyst_mm:
+            n3 = 0
+        else:
+            # Transition zone [th - margin, th + margin]
+            # Ambiguous concavity requires shape maturation to confirm notch presence
+            if shape3 != "Trapezoidal" and c3_depth_mm >= th_depth:
+                n3 = 1
+            else:
+                n3 = 0
+
+        # 3. C4 notch resolution: requires prior C3 maturity (monotonicity)
+        if thresholds.strict_biological_hierarchy and n3 == 0:
+            n4 = 0
+        elif c4_depth_mm >= th_depth + hyst_mm:
+            n4 = 1
+        elif c4_depth_mm < th_depth - hyst_mm:
+            n4 = 0
+        else:
+            # Transition zone [th - margin, th + margin]
+            if shape4 != "Trapezoidal" and c4_depth_mm >= th_depth:
+                n4 = 1
+            else:
+                n4 = 0
+    else:
+        n2 = 1 if c2_concave else 0
+        n3 = 1 if c3_concave else 0
+        n4 = 1 if c4_concave else 0
 
     # 1. Check exact match with Table 2
     exact_stage = None
@@ -341,10 +489,9 @@ def classify_cvm_stage(
 
     if exact_stage is not None:
         stage = exact_stage
-    else:
-        # Hierarchical rule engine encoding Table 2 & Baccetti criteria for boundary/intermediate cases
+    elif not thresholds.enable_fuzzy_hysteresis:
+        # Legacy fallback logic for exact backward compatibility
         if c2_concave and c3_concave and c4_concave:
-            # CS4, CS5, CS6: differentiated by shape maturation
             if shape3 == "Rectangular Vertical" or shape4 == "Rectangular Vertical":
                 stage = "CS6"
             elif shape3 == "Square" or shape4 == "Square":
@@ -352,7 +499,6 @@ def classify_cvm_stage(
             else:
                 stage = "CS4"
         elif c2_concave and c3_concave:
-            # CS3: C2 & C3 concave, C4 flat
             if shape3 == "Rectangular Vertical" or shape4 == "Rectangular Vertical":
                 stage = "CS6"
             elif shape3 == "Square" or shape4 == "Square":
@@ -360,7 +506,6 @@ def classify_cvm_stage(
             else:
                 stage = "CS3"
         elif c2_concave:
-            # CS2: C2 concave, C3 & C4 flat
             if shape3 == "Rectangular Vertical" or shape4 == "Rectangular Vertical":
                 stage = "CS6"
             elif shape3 == "Square" or shape4 == "Square":
@@ -372,7 +517,6 @@ def classify_cvm_stage(
             else:
                 stage = "CS2"
         else:
-            # CS1: Flat C2
             if shape3 == "Rectangular Vertical" or shape4 == "Rectangular Vertical":
                 stage = "CS6"
             elif shape3 == "Square" or shape4 == "Square":
@@ -385,36 +529,59 @@ def classify_cvm_stage(
                 stage = "CS3"
             else:
                 stage = "CS1"
+    else:
+        # Robust clinical hierarchical fallback with hysteresis & biological hierarchy
+        # Mature adult vertebral shapes (CS5/CS6)
+        if shape3 == "Rectangular Vertical" or shape4 == "Rectangular Vertical":
+            stage = "CS6"
+        elif shape3 == "Square" or shape4 == "Square":
+            stage = "CS5"
+        elif n2 == 1 and n3 == 1 and n4 == 1:
+            stage = "CS4"
+        elif n2 == 1 and n3 == 1:
+            stage = "CS3"
+        elif n2 == 1:
+            stage = "CS2"
+        else:
+            stage = "CS1"
 
-    s = thresholds.pixel_to_mm if thresholds.pixel_to_mm is not None else 0.375
     details = {
         "spatial_calibration_mm_per_px": s,
         "concavity_threshold_mm": thresholds.concavity_depth_mm_threshold,
+        "fuzzy_hysteresis_enabled": thresholds.enable_fuzzy_hysteresis,
+        "concavity_hysteresis_mm": thresholds.concavity_hysteresis_mm if thresholds.enable_fuzzy_hysteresis else 0.0,
+        "effective_notches": {"C2": n2, "C3": n3, "C4": n4},
         "C2": {
             "concavity_depth": c2_depth,
             "concavity_depth_px": c2_depth,
-            "concavity_depth_mm": c2_depth * s,
+            "concavity_depth_mm": c2_depth_mm,
             "concavity_ratio": c2_ratio,
-            "is_concave": c2_concave,
+            "is_concave": bool(n2 == 1 if thresholds.enable_fuzzy_hysteresis else c2_concave),
+            "raw_is_concave": c2_concave,
             "notch": n2,
+            "fuzzy": c2_fuzzy,
         },
         "C3": {
             "concavity_depth": c3_depth,
             "concavity_depth_px": c3_depth,
-            "concavity_depth_mm": c3_depth * s,
+            "concavity_depth_mm": c3_depth_mm,
             "concavity_ratio": c3_ratio,
-            "is_concave": c3_concave,
+            "is_concave": bool(n3 == 1 if thresholds.enable_fuzzy_hysteresis else c3_concave),
+            "raw_is_concave": c3_concave,
             "notch": n3,
             "shape_metrics": c3_shape_metrics,
+            "fuzzy": c3_fuzzy,
         },
         "C4": {
             "concavity_depth": c4_depth,
             "concavity_depth_px": c4_depth,
-            "concavity_depth_mm": c4_depth * s,
+            "concavity_depth_mm": c4_depth_mm,
             "concavity_ratio": c4_ratio,
-            "is_concave": c4_concave,
+            "is_concave": bool(n4 == 1 if thresholds.enable_fuzzy_hysteresis else c4_concave),
+            "raw_is_concave": c4_concave,
             "notch": n4,
             "shape_metrics": c4_shape_metrics,
+            "fuzzy": c4_fuzzy,
         },
         "table_2_exact_match": exact_stage is not None,
     }
