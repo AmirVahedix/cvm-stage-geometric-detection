@@ -366,6 +366,36 @@ class TestCVMHysteresisAndFuzzy(unittest.TestCase):
         self.assertEqual(res["stage"], "CS2")
         self.assertEqual(res["details"]["effective_notches"]["C3"], 0)
 
+    def test_default_fuzzy_hysteresis_is_disabled(self):
+        th = CVMThresholds()
+        self.assertFalse(th.enable_fuzzy_hysteresis)
+
+    def test_default_version_vs_fuzzy_hysteresis_parameter(self):
+        # Case where C2 is concave, and C3 has borderline concavity 1.02 mm with Trapezoid shape.
+        ip = Point(0, 0)
+        ia = Point(10, 0)
+        c2 = VertebraC2(ip, Point(5, 3.5), ia)
+        sp3 = Point(0, 5)
+        sa3 = Point(10, 5)  # Trapezoid
+        c3 = VertebraC3C4(ip, Point(5, 2.72), ia, sp3, sa3)
+        c4 = VertebraC3C4(ip, Point(5, 0.5), ia, sp3, sa3)
+        cvm_input = CVMInput(c2, c3, c4)
+
+        # 1. Default (previous version without hysteresis/fuzzy zone):
+        res_default = classify_cvm_stage(cvm_input)
+        self.assertEqual(res_default["stage"], "CS3")
+        self.assertFalse(res_default["details"]["fuzzy_hysteresis_enabled"])
+
+        # 2. Overriding via parameter enable_fuzzy_hysteresis=True:
+        res_fuzzy = classify_cvm_stage(cvm_input, enable_fuzzy_hysteresis=True)
+        self.assertEqual(res_fuzzy["stage"], "CS2")
+        self.assertTrue(res_fuzzy["details"]["fuzzy_hysteresis_enabled"])
+
+        # 3. Explicitly setting in CVMThresholds:
+        th_enabled = CVMThresholds(enable_fuzzy_hysteresis=True)
+        res_th = classify_cvm_stage(cvm_input, thresholds=th_enabled)
+        self.assertEqual(res_th["stage"], "CS2")
+
 
 if __name__ == "__main__":
     unittest.main()

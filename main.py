@@ -33,6 +33,10 @@ def main():
         trapezoid_si_threshold=args.trapezoid_si_threshold,
         rect_horizontal_si_threshold=args.rect_horizontal_threshold,
         rect_vertical_si_threshold=args.rect_vertical_threshold,
+        enable_fuzzy_hysteresis=args.enable_fuzzy_hysteresis,
+        concavity_hysteresis_mm=args.concavity_hysteresis_mm,
+        shape_fuzzy_margin=args.shape_fuzzy_margin,
+        strict_biological_hierarchy=args.strict_biological_hierarchy,
     )
 
     print(f"[CVM Detection] Running inference on: {args.image}...")

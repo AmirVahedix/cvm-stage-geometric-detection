@@ -136,6 +136,7 @@ def predict_cvm(
     threshold_trapezoid_si: float,
     threshold_horizontal_si: float,
     threshold_vertical_si: float,
+    enable_fuzzy_hysteresis: bool = False,
 ):
     if image is None:
         return (
@@ -152,6 +153,7 @@ def predict_cvm(
         trapezoid_si_threshold=threshold_trapezoid_si,
         rect_horizontal_si_threshold=threshold_horizontal_si,
         rect_vertical_si_threshold=threshold_vertical_si,
+        enable_fuzzy_hysteresis=enable_fuzzy_hysteresis,
     )
 
     # 2. Run real model inference and CVM classification
@@ -255,6 +257,11 @@ with gr.Blocks() as demo:
                     label="Rectangular Vertical SI Threshold (SI >= threshold)",
                     info="Section 2.5.2: SI >= 1.15 for Rectangular Vertical (default: 1.15)",
                 )
+                enable_fuzzy_hysteresis = gr.Checkbox(
+                    value=False,
+                    label="Enable Hysteresis Buffer & Fuzzy Transition Zone",
+                    info="Apply concavity hysteresis buffer and fuzzy transition margin on vertebral shapes (default: False)",
+                )
 
             predict_btn = gr.Button("Predict CVM Stage", variant="primary")
 
@@ -277,6 +284,7 @@ with gr.Blocks() as demo:
             th_trapezoid_si,
             th_horizontal,
             th_vertical,
+            enable_fuzzy_hysteresis,
         ],
         outputs=[
             output_image,

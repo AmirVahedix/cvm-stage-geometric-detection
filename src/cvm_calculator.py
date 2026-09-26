@@ -98,7 +98,7 @@ class CVMThresholds:
     rect_vertical_si_threshold: float = 1.15
 
     # --- Hysteresis Buffer & Fuzzy Transition Parameters ---
-    enable_fuzzy_hysteresis: bool = True
+    enable_fuzzy_hysteresis: bool = False
     concavity_hysteresis_mm: float = 0.15  # Hysteresis buffer +/- around concavity threshold (e.g. [0.85, 1.15] mm)
     concavity_ratio_hysteresis: float = 0.015  # Fallback relative buffer for concavity ratio
     shape_fuzzy_margin: float = 0.03  # Buffer margin for borderline shape ratios (e.g. trapezoid preservation)
@@ -360,7 +360,9 @@ def calculate_shape(
 
 
 def classify_cvm_stage(
-    input_data: CVMInput, thresholds: Optional[CVMThresholds] = None
+    input_data: CVMInput,
+    thresholds: Optional[CVMThresholds] = None,
+    enable_fuzzy_hysteresis: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Classifies the Cervical Vertebral Maturation (CVM) stage (CS1-CS6) based on 13 landmarks
@@ -369,6 +371,8 @@ def classify_cvm_stage(
     Args:
         input_data: CVMInput containing the landmark points for C2, C3, and C4.
         thresholds: Configuration parameters for CVM classification. If None, default thresholds are used.
+        enable_fuzzy_hysteresis: Optional override to enable or disable hysteresis buffer and fuzzy transition zone.
+            If None, uses thresholds.enable_fuzzy_hysteresis (default: False).
         
     Returns:
         A dictionary containing:
@@ -377,6 +381,9 @@ def classify_cvm_stage(
     """
     if thresholds is None:
         thresholds = CVMThresholds()
+    if enable_fuzzy_hysteresis is not None:
+        from dataclasses import replace
+        thresholds = replace(thresholds, enable_fuzzy_hysteresis=enable_fuzzy_hysteresis)
 
     # 1. Evaluate C2 Concavity
     c2_depth, c2_ratio, c2_concave = calculate_concavity(

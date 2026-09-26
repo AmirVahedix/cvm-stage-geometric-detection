@@ -463,6 +463,7 @@ class CVMPredictor:
         thresholds: Optional[CVMThresholds] = None,
         annotate: bool = True,
         draw_labels: bool = False,
+        enable_fuzzy_hysteresis: Optional[bool] = None,
     ) -> PredictionResult:
         """
         Complete pipeline: Landmark detection -> Geometric analysis -> CVM stage classification.
@@ -479,7 +480,11 @@ class CVMPredictor:
 
         # 2. Geometric CVM stage calculation
         cvm_input = CVMInput.from_dict(landmarks_dict)
-        classification = classify_cvm_stage(cvm_input, thresholds=thresholds)
+        classification = classify_cvm_stage(
+            cvm_input,
+            thresholds=thresholds,
+            enable_fuzzy_hysteresis=enable_fuzzy_hysteresis,
+        )
 
         # 3. Landmark annotation
         annotated_img = None
@@ -647,6 +652,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Rectangular vertical shape index threshold SI >= threshold (default: 1.15)",
     )
     parser.add_argument(
+        "--enable-fuzzy-hysteresis",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable concavity hysteresis buffer and fuzzy transition zone (default: False)",
+    )
+    parser.add_argument(
+        "--concavity-hysteresis-mm",
+        type=float,
+        default=0.15,
+        help="Concavity hysteresis buffer (+/- mm) around threshold (default: 0.15)",
+    )
+    parser.add_argument(
+        "--shape-fuzzy-margin",
+        type=float,
+        default=0.03,
+        help="Buffer margin for borderline shape ratios (default: 0.03)",
+    )
+    parser.add_argument(
+        "--strict-biological-hierarchy",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enforce biological monotonicity for concavity notches (default: True)",
+    )
+    parser.add_argument(
         "--draw-labels",
         action="store_true",
         help="Draw text labels beside landmark points on output image",
@@ -673,6 +702,10 @@ def main():
         trapezoid_si_threshold=args.trapezoid_si_threshold,
         rect_horizontal_si_threshold=args.rect_horizontal_threshold,
         rect_vertical_si_threshold=args.rect_vertical_threshold,
+        enable_fuzzy_hysteresis=args.enable_fuzzy_hysteresis,
+        concavity_hysteresis_mm=args.concavity_hysteresis_mm,
+        shape_fuzzy_margin=args.shape_fuzzy_margin,
+        strict_biological_hierarchy=args.strict_biological_hierarchy,
     )
 
     predictor = CVMPredictor(

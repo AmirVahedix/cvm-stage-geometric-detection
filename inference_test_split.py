@@ -132,6 +132,30 @@ def parse_args():
         action="store_true",
         help="If set, recomputes GT stages by running cvm_calculator on raw landmark annotations from export_cache.json.",
     )
+    parser.add_argument(
+        "--enable-fuzzy-hysteresis",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable hysteresis buffer and fuzzy transition zone in CVM calculator (default: False).",
+    )
+    parser.add_argument(
+        "--concavity-hysteresis-mm",
+        type=float,
+        default=0.15,
+        help="Concavity hysteresis buffer (+/- mm) around threshold (default: 0.15).",
+    )
+    parser.add_argument(
+        "--shape-fuzzy-margin",
+        type=float,
+        default=0.03,
+        help="Shape ratio fuzzy transition margin (default: 0.03).",
+    )
+    parser.add_argument(
+        "--strict-biological-hierarchy",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enforce biological monotonicity for concavity notches (default: True).",
+    )
     return parser.parse_args()
 
 
@@ -374,7 +398,12 @@ def main():
         except Exception as e:
             print(f"⚠️ Could not load export cache ({e}), proceeding with files only.")
 
-    thresholds = CVMThresholds()
+    thresholds = CVMThresholds(
+        enable_fuzzy_hysteresis=args.enable_fuzzy_hysteresis,
+        concavity_hysteresis_mm=args.concavity_hysteresis_mm,
+        shape_fuzzy_margin=args.shape_fuzzy_margin,
+        strict_biological_hierarchy=args.strict_biological_hierarchy,
+    )
 
     # -------------------------------------------------------------
     # PART 1: GROUND TRUTH EVALUATION & SYMBOLIC GENERATION
