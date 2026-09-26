@@ -216,8 +216,8 @@ def parse_args():
     parser.add_argument(
         "--save-predicted-landmarks",
         type=str,
-        default=None,
-        help="Optional path to save all predicted landmarks to a JSON file.",
+        default="predicted_landmarks.json",
+        help="Path to save all 13 predicted landmarks (x, y) for each image to a JSON file (default: predicted_landmarks.json).",
     )
 
     # CVM Calculator geometric parameters
@@ -794,12 +794,31 @@ def main():
                 ])
         print(f"📊 Detailed run comparison CSV saved to: {mapping_path.resolve()}")
 
-    # Optional: Save predicted landmarks JSON
+    # Save predicted landmarks JSON & CSV
     if args.save_predicted_landmarks:
         pl_path = output_dir / args.save_predicted_landmarks
         with open(pl_path, "w", encoding="utf-8") as f:
             json.dump(predicted_landmarks_export, f, indent=2)
-        print(f"💾 Predicted landmarks saved to: {pl_path.resolve()}")
+        print(f"💾 Predicted landmarks JSON saved to: {pl_path.resolve()}")
+
+        # Also save CSV version for easy spreadsheet/analysis inspection
+        pl_csv_path = output_dir / "predicted_landmarks.csv"
+        with open(pl_csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            header = ["filename"]
+            for lm in EXPECTED_LANDMARKS:
+                header.extend([f"{lm}_x", f"{lm}_y"])
+            writer.writerow(header)
+            for fn, lm_dict in predicted_landmarks_export.items():
+                row = [fn]
+                for lm in EXPECTED_LANDMARKS:
+                    pt = lm_dict.get(lm, [None, None])
+                    row.extend([
+                        round(pt[0], 2) if pt[0] is not None else "",
+                        round(pt[1], 2) if pt[1] is not None else "",
+                    ])
+                writer.writerow(row)
+        print(f"📊 Predicted landmarks CSV saved to:  {pl_csv_path.resolve()}")
 
     # 10. Display Formatted Distribution Summary Table in Terminal
     print("\n" + "=" * 90)

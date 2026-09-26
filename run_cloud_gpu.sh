@@ -113,14 +113,16 @@ python3 inference_on_label_studio_project_1.py \
     --run4-output run4_pred_fuzzy.txt \
     --summary-json runs_distribution.json \
     --save-mapping runs_comparison.csv \
+    --save-predicted-landmarks predicted_landmarks.json \
     "$@"
 
 echo "=================================================================="
 echo "🎉 Completed successfully! Outputs saved:"
-echo "   - run1_gt_standard.txt   (Run 1: Standard on Ground-Truth)"
-echo "   - run2_pred_standard.txt (Run 2: Standard on Predicted)"
-echo "   - run3_gt_fuzzy.txt      (Run 3: Fuzzy on Ground-Truth)"
-echo "   - run4_pred_fuzzy.txt    (Run 4: Fuzzy on Predicted)"
-echo "   - runs_distribution.json (6-class distributions & accuracy)"
-echo "   - runs_comparison.csv    (Ordinal per-image comparison table)"
+echo "   - run1_gt_standard.txt       (Run 1: Standard on Ground-Truth)"
+echo "   - run2_pred_standard.txt     (Run 2: Standard on Predicted)"
+echo "   - run3_gt_fuzzy.txt          (Run 3: Fuzzy on Ground-Truth)"
+echo "   - run4_pred_fuzzy.txt        (Run 4: Fuzzy on Predicted)"
+echo "   - runs_distribution.json     (6-class distributions & accuracy)"
+echo "   - runs_comparison.csv        (Ordinal per-image comparison table)"
+echo "   - predicted_landmarks.json   (All 13 predicted landmark coordinates x,y per image)"
 echo "=================================================================="
