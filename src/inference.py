@@ -675,6 +675,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=True,
         help="Enforce biological monotonicity for concavity notches (default: True)",
     )
+    # 3 CVM Calculator modes: standard - fuzzy - calibrated
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default=None,
+        choices=["standard", "fuzzy", "calibrated"],
+        help="CVM staging calculator mode: 'standard', 'fuzzy', or 'calibrated' (default: standard)",
+    )
+    parser.add_argument(
+        "--calibrated",
+        action="store_true",
+        help="Enable calibrated CVM calculator mode with C4-specific concavity threshold and anatomical order guard",
+    )
+    parser.add_argument(
+        "--c4-concavity-threshold-mm",
+        type=float,
+        default=1.20,
+        help="C4 concavity depth threshold in mm for calibrated mode (default: 1.20 mm)",
+    )
+    parser.add_argument(
+        "--c4-concavity-ratio",
+        type=float,
+        default=0.065,
+        help="C4 concavity relative ratio threshold for calibrated mode (default: 0.065 = 6.5%%)",
+    )
+    parser.add_argument(
+        "--c4-rule",
+        type=str,
+        default="depth",
+        choices=["depth", "ratio", "both", "either"],
+        help="C4 concavity threshold rule in calibrated mode (default: depth)",
+    )
     parser.add_argument(
         "--draw-labels",
         action="store_true",
@@ -693,7 +725,17 @@ def main():
     parser = build_arg_parser()
     args = parser.parse_args()
 
+    # Determine calculator mode
+    mode = args.mode
+    if args.calibrated:
+        mode = "calibrated"
+    elif args.enable_fuzzy_hysteresis:
+        mode = "fuzzy"
+    elif mode is None:
+        mode = "standard"
+
     thresholds = CVMThresholds(
+        mode=mode,
         use_absolute_depth=args.use_absolute_depth,
         pixel_to_mm=args.pixel_to_mm,
         concavity_depth_mm_threshold=args.concavity_threshold_mm,
@@ -702,7 +744,11 @@ def main():
         trapezoid_si_threshold=args.trapezoid_si_threshold,
         rect_horizontal_si_threshold=args.rect_horizontal_threshold,
         rect_vertical_si_threshold=args.rect_vertical_threshold,
-        enable_fuzzy_hysteresis=args.enable_fuzzy_hysteresis,
+        enable_fuzzy_hysteresis=(mode == "fuzzy"),
+        enable_calibrated=(mode == "calibrated"),
+        c4_concavity_depth_mm_threshold=args.c4_concavity_threshold_mm,
+        c4_concavity_ratio_threshold=args.c4_concavity_ratio,
+        c4_rule=args.c4_rule,
         concavity_hysteresis_mm=args.concavity_hysteresis_mm,
         shape_fuzzy_margin=args.shape_fuzzy_margin,
         strict_biological_hierarchy=args.strict_biological_hierarchy,

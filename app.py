@@ -92,6 +92,16 @@ def format_results_to_html(result: dict) -> str:
             if v_data["is_concave"]
             else "Flat"
         )
+        if vert_id == "C4" and details.get("c4_notch_suppressed_by_order_guard"):
+            v_concave_status += " <span style='color: #E53E3E; font-size: 11px; font-weight: 700;'>(Suppressed by Anatomical Guard)</span>"
+        elif vert_id == "C3" and details.get("c3_notch_suppressed_by_order_guard"):
+            v_concave_status += " <span style='color: #E53E3E; font-size: 11px; font-weight: 700;'>(Suppressed by Anatomical Guard)</span>"
+
+        vert_th_mm = (
+            details.get("c4_concavity_threshold_mm", th_depth_mm)
+            if vert_id == "C4" and details.get("calibrated_enabled")
+            else th_depth_mm
+        )
 
         html += f"""
             <div style="background-color: #F8FAFC; border-left: 5px solid {vert_color}; padding: 15px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); border-top: 1px solid #EDF2F7; border-right: 1px solid #EDF2F7; border-bottom: 1px solid #EDF2F7;">
@@ -100,6 +110,10 @@ def format_results_to_html(result: dict) -> str:
                     <tr style="border-bottom: 1px solid #E2E8F0;">
                         <td style="padding: 6px 0; font-weight: 600; width: 65%;">Inferior Concavity Depth:</td>
                         <td style="padding: 6px 0; text-align: right; font-family: monospace;">{v_data['concavity_depth_px']:.2f} px ({v_data['concavity_depth_mm']:.2f} mm)</td>
+                    </tr>
+                    <tr style="border-bottom: 1px solid #E2E8F0;">
+                        <td style="padding: 6px 0; font-weight: 600;">Concavity Threshold:</td>
+                        <td style="padding: 6px 0; text-align: right; font-family: monospace;">{vert_th_mm:.2f} mm</td>
                     </tr>
                     <tr style="border-bottom: 1px solid #E2E8F0;">
                         <td style="padding: 6px 0; font-weight: 600;">Notch Status:</td>
@@ -136,7 +150,9 @@ def predict_cvm(
     threshold_trapezoid_si: float,
     threshold_horizontal_si: float,
     threshold_vertical_si: float,
-    enable_fuzzy_hysteresis: bool = False,
+    calculator_mode: str = "Standard",
+    threshold_c4_concavity_mm: float = 1.20,
+    threshold_c4_ratio: float = 0.065,
 ):
     if image is None:
         return (
@@ -144,16 +160,21 @@ def predict_cvm(
             "<div style='color: red; padding: 10px; font-weight: bold;'>Error: Please upload an image first.</div>",
         )
 
+    mode_clean = calculator_mode.lower()
     # 1. Prepare thresholds from Section 2.5
     thresholds = CVMThresholds(
+        mode=mode_clean,
         use_absolute_depth=True,
         pixel_to_mm=calibration_s,
         concavity_depth_mm_threshold=threshold_concavity_mm,
+        c4_concavity_depth_mm_threshold=threshold_c4_concavity_mm,
+        c4_concavity_ratio_threshold=threshold_c4_ratio,
         trapezoid_taper_threshold=threshold_taper,
         trapezoid_si_threshold=threshold_trapezoid_si,
         rect_horizontal_si_threshold=threshold_horizontal_si,
         rect_vertical_si_threshold=threshold_vertical_si,
-        enable_fuzzy_hysteresis=enable_fuzzy_hysteresis,
+        enable_fuzzy_hysteresis=(mode_clean == "fuzzy"),
+        enable_calibrated=(mode_clean == "calibrated"),
     )
 
     # 2. Run real model inference and CVM classification
@@ -208,7 +229,14 @@ with gr.Blocks() as demo:
         with gr.Column(scale=5):
             input_image = gr.Image(type="pil", label="Lateral Cephalometric X-ray Image")
 
-            with gr.Accordion(label="CVM Classification Threshold Settings (Section 2.5)", open=False):
+            calculator_mode = gr.Radio(
+                choices=["Standard", "Fuzzy", "Calibrated"],
+                value="Standard",
+                label="CVM Calculator Mode",
+                info="Standard (flat 1.0mm), Fuzzy (hysteresis transition), or Calibrated (Tweak A: C4 1.20mm + Tweak B: order guard)",
+            )
+
+            with gr.Accordion(label="CVM Classification Threshold Settings", open=False):
                 th_calibration = gr.Slider(
                     minimum=0.10,
                     maximum=0.80,
@@ -222,8 +250,24 @@ with gr.Blocks() as demo:
                     maximum=2.50,
                     step=0.05,
                     value=1.0,
-                    label="Concavity Depth Threshold (mm)",
-                    info="Physical concavity threshold for notch presence (default: 1.0 mm)",
+                    label="General Concavity Depth Threshold (mm)",
+                    info="Physical concavity threshold for C2/C3 notch presence (default: 1.0 mm)",
+                )
+                th_c4_concavity = gr.Slider(
+                    minimum=0.50,
+                    maximum=2.50,
+                    step=0.05,
+                    value=1.20,
+                    label="C4 Concavity Depth Threshold (Calibrated Mode)",
+                    info="Tweak A: raised C4 threshold to suppress landmark jitter (default: 1.20 mm)",
+                )
+                th_c4_ratio = gr.Slider(
+                    minimum=0.02,
+                    maximum=0.15,
+                    step=0.005,
+                    value=0.065,
+                    label="C4 Relative Concavity Ratio (Calibrated Mode)",
+                    info="Tweak A: relative ratio threshold depth/width >= 6.5% (default: 0.065)",
                 )
                 th_taper = gr.Slider(
                     minimum=1.00,
@@ -257,11 +301,6 @@ with gr.Blocks() as demo:
                     label="Rectangular Vertical SI Threshold (SI >= threshold)",
                     info="Section 2.5.2: SI >= 1.15 for Rectangular Vertical (default: 1.15)",
                 )
-                enable_fuzzy_hysteresis = gr.Checkbox(
-                    value=False,
-                    label="Enable Hysteresis Buffer & Fuzzy Transition Zone",
-                    info="Apply concavity hysteresis buffer and fuzzy transition margin on vertebral shapes (default: False)",
-                )
 
             predict_btn = gr.Button("Predict CVM Stage", variant="primary")
 
@@ -284,7 +323,9 @@ with gr.Blocks() as demo:
             th_trapezoid_si,
             th_horizontal,
             th_vertical,
-            enable_fuzzy_hysteresis,
+            calculator_mode,
+            th_c4_concavity,
+            th_c4_ratio,
         ],
         outputs=[
             output_image,

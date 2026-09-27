@@ -396,6 +396,116 @@ class TestCVMHysteresisAndFuzzy(unittest.TestCase):
         res_th = classify_cvm_stage(cvm_input, thresholds=th_enabled)
         self.assertEqual(res_th["stage"], "CS2")
 
+    def test_calibrated_mode_thresholds_configuration(self):
+        th_std = CVMThresholds()
+        self.assertEqual(th_std.mode, "standard")
+        self.assertFalse(th_std.enable_calibrated)
+        self.assertFalse(th_std.enable_fuzzy_hysteresis)
+
+        th_fuzzy = CVMThresholds(mode="fuzzy")
+        self.assertEqual(th_fuzzy.mode, "fuzzy")
+        self.assertTrue(th_fuzzy.enable_fuzzy_hysteresis)
+        self.assertFalse(th_fuzzy.enable_calibrated)
+
+        th_calib = CVMThresholds(enable_calibrated=True)
+        self.assertEqual(th_calib.mode, "calibrated")
+        self.assertTrue(th_calib.enable_calibrated)
+        self.assertFalse(th_calib.enable_fuzzy_hysteresis)
+        self.assertEqual(th_calib.c4_concavity_depth_mm_threshold, 1.20)
+        self.assertEqual(th_calib.c4_concavity_ratio_threshold, 0.065)
+
+    def test_calibrated_tweak_a_c4_concavity_depth_threshold(self):
+        # Base length = 10 px, S = 0.375 mm/px
+        # C4 depth = 2.933 px * 0.375 = 1.10 mm (between 1.0 mm and 1.20 mm)
+        ip = Point(0, 0)
+        ia = Point(10, 0)
+        ic_1_10mm = Point(5, 2.93333)
+
+        th_std = CVMThresholds(mode="standard")
+        _, _, concave_std = calculate_concavity(ip, ic_1_10mm, ia, th_std, vertebra_id="C4")
+        self.assertTrue(concave_std, "In standard mode, 1.10mm is concave (>= 1.0mm)")
+
+        th_calib = CVMThresholds(mode="calibrated", c4_concavity_depth_mm_threshold=1.20)
+        _, _, concave_calib = calculate_concavity(ip, ic_1_10mm, ia, th_calib, vertebra_id="C4")
+        self.assertFalse(concave_calib, "In calibrated mode, 1.10mm is flat (< 1.20mm threshold)")
+
+        # Verify C4 depth at 1.25 mm is concave in calibrated mode
+        ic_1_25mm = Point(5, 3.33333)
+        _, _, concave_calib_high = calculate_concavity(ip, ic_1_25mm, ia, th_calib, vertebra_id="C4")
+        self.assertTrue(concave_calib_high, "In calibrated mode, 1.25mm is concave (>= 1.20mm threshold)")
+
+    def test_calibrated_tweak_a_c4_relative_ratio_threshold(self):
+        # Base length = 100 px
+        ip = Point(0, 0)
+        ia = Point(100, 0)
+
+        # Depth = 5 px -> ratio = 5/100 = 5.0% (< 6.5%)
+        ic_5pct = Point(50, 5.0)
+        th_ratio = CVMThresholds(mode="calibrated", c4_rule="ratio", c4_concavity_ratio_threshold=0.065)
+        _, r_5, concave_5 = calculate_concavity(ip, ic_5pct, ia, th_ratio, vertebra_id="C4")
+        self.assertAlmostEqual(r_5, 0.05)
+        self.assertFalse(concave_5, "Ratio 5.0% is below 6.5% threshold -> Flat")
+
+        # Depth = 7 px -> ratio = 7/100 = 7.0% (>= 6.5%)
+        ic_7pct = Point(50, 7.0)
+        _, r_7, concave_7 = calculate_concavity(ip, ic_7pct, ia, th_ratio, vertebra_id="C4")
+        self.assertAlmostEqual(r_7, 0.07)
+        self.assertTrue(concave_7, "Ratio 7.0% is above 6.5% threshold -> Concave")
+
+    def test_calibrated_tweak_b_concavity_order_guard_c4_suppression(self):
+        # Tweak B: If C4 notch is detected, but C2 or C3 notch is absent,
+        # it is an anatomical artifact -> suppress C4 notch unless C2/C3 are confirmed.
+        ip = Point(0, 0)
+        ia = Point(10, 0)
+
+        # Scenario 1: C2 is concave (1.30 mm), C3 is flat (0.2 mm), C4 has jitter notch (1.30 mm)
+        c2 = VertebraC2(ip, Point(5, 3.5), ia)  # 3.5 * 0.375 = 1.31 mm (concave)
+        sp = Point(0, 5)
+        sa = Point(10, 5)  # Trapezoidal shapes
+        c3 = VertebraC3C4(ip, Point(5, 0.5), ia, sp, sa)  # 0.5 * 0.375 = 0.19 mm (flat)
+        c4 = VertebraC3C4(ip, Point(5, 3.5), ia, sp, sa)  # 3.5 * 0.375 = 1.31 mm (jitter notch)
+
+        cvm_input = CVMInput(c2, c3, c4)
+
+        # In standard mode without order guard:
+        res_std = classify_cvm_stage(cvm_input, mode="standard")
+        self.assertEqual(res_std["details"]["C4"]["notch"], 1)
+
+        # In calibrated mode: C4 notch is suppressed because C3 is flat (not confirmed)
+        res_calib = classify_cvm_stage(cvm_input, mode="calibrated")
+        self.assertEqual(res_calib["details"]["effective_notches"]["C4"], 0)
+        self.assertTrue(res_calib["details"]["c4_notch_suppressed_by_order_guard"])
+        # Should stay in CS2 because C2 is concave, C3 is flat, C4 is suppressed!
+        self.assertEqual(res_calib["stage"], "CS2")
+
+    def test_calibrated_mode_preserves_cs3_when_c4_is_suppressed(self):
+        # Scenario 2: C2 is concave, C3 is concave with Rectangular Horizontal shape,
+        # C4 is Trapezoidal with jitter concavity 1.10 mm.
+        ip = Point(0, 0)
+        ia = Point(10, 0)
+        c2 = VertebraC2(ip, Point(5, 3.5), ia)  # 1.31 mm (concave)
+
+        # C3 is concave and Rectangular Horizontal: SI = 16 / 20 = 0.80
+        sp3 = Point(0, 8)
+        sa3 = Point(10, 8)
+        c3 = VertebraC3C4(ip, Point(5, 3.5), ia, sp3, sa3)
+
+        # C4 is Trapezoidal with borderline concavity 1.10 mm (2.93 px * 0.375 = 1.10 mm)
+        sp4 = Point(0, 5)
+        sa4 = Point(10, 5)  # SI = 10 / 20 = 0.50 (Trapezoidal)
+        c4 = VertebraC3C4(ip, Point(5, 2.933), ia, sp4, sa4)
+
+        cvm_input = CVMInput(c2, c3, c4)
+
+        # Standard mode: C4 is >= 1.0 mm -> falsely triggers CS4
+        res_std = classify_cvm_stage(cvm_input, mode="standard")
+        self.assertEqual(res_std["stage"], "CS4")
+
+        # Calibrated mode: C4 is < 1.20 mm threshold -> C4 remains flat -> accurately classified as CS3!
+        res_calib = classify_cvm_stage(cvm_input, mode="calibrated")
+        self.assertEqual(res_calib["stage"], "CS3")
+        self.assertEqual(res_calib["details"]["effective_notches"]["C4"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

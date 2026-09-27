@@ -222,6 +222,23 @@ def parse_args():
 
     # CVM Calculator geometric parameters
     parser.add_argument(
+        "--calibrated",
+        action="store_true",
+        help="Enable calibrated mode (Tweak A: C4 threshold 1.20mm/6.5%% + Tweak B: concavity order guard).",
+    )
+    parser.add_argument(
+        "--c4-concavity-threshold-mm",
+        type=float,
+        default=1.20,
+        help="C4 concavity depth threshold in mm for calibrated mode (default: 1.20 mm).",
+    )
+    parser.add_argument(
+        "--c4-concavity-ratio",
+        type=float,
+        default=0.065,
+        help="C4 concavity relative ratio threshold for calibrated mode (default: 0.065 = 6.5%%).",
+    )
+    parser.add_argument(
         "--concavity-hysteresis-mm",
         type=float,
         default=0.15,

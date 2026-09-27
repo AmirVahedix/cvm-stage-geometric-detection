@@ -24,7 +24,17 @@ def main():
         print(f"Error: Image file not found: {args.image}", file=sys.stderr)
         sys.exit(1)
 
+    # Determine calculator mode
+    mode = args.mode
+    if args.calibrated:
+        mode = "calibrated"
+    elif args.enable_fuzzy_hysteresis:
+        mode = "fuzzy"
+    elif mode is None:
+        mode = "standard"
+
     thresholds = CVMThresholds(
+        mode=mode,
         use_absolute_depth=args.use_absolute_depth,
         pixel_to_mm=args.pixel_to_mm,
         concavity_depth_mm_threshold=args.concavity_threshold_mm,
@@ -33,7 +43,11 @@ def main():
         trapezoid_si_threshold=args.trapezoid_si_threshold,
         rect_horizontal_si_threshold=args.rect_horizontal_threshold,
         rect_vertical_si_threshold=args.rect_vertical_threshold,
-        enable_fuzzy_hysteresis=args.enable_fuzzy_hysteresis,
+        enable_fuzzy_hysteresis=(mode == "fuzzy"),
+        enable_calibrated=(mode == "calibrated"),
+        c4_concavity_depth_mm_threshold=args.c4_concavity_threshold_mm,
+        c4_concavity_ratio_threshold=args.c4_concavity_ratio,
+        c4_rule=args.c4_rule,
         concavity_hysteresis_mm=args.concavity_hysteresis_mm,
         shape_fuzzy_margin=args.shape_fuzzy_margin,
         strict_biological_hierarchy=args.strict_biological_hierarchy,

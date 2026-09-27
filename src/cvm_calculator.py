@@ -97,12 +97,40 @@ class CVMThresholds:
     # Rectangular Vertical: SI >= 1.15
     rect_vertical_si_threshold: float = 1.15
 
-    # --- Hysteresis Buffer & Fuzzy Transition Parameters ---
+    # --- Operating Mode ---
+    # Modes: "standard", "fuzzy", or "calibrated"
+    mode: str = "standard"
+
+    # --- Hysteresis Buffer & Fuzzy Transition Parameters (Mode: 'fuzzy') ---
     enable_fuzzy_hysteresis: bool = False
     concavity_hysteresis_mm: float = 0.15  # Hysteresis buffer +/- around concavity threshold (e.g. [0.85, 1.15] mm)
     concavity_ratio_hysteresis: float = 0.015  # Fallback relative buffer for concavity ratio
     shape_fuzzy_margin: float = 0.03  # Buffer margin for borderline shape ratios (e.g. trapezoid preservation)
     strict_biological_hierarchy: bool = True  # Monotonic progression (C2 notch precedes C3, C3 precedes C4)
+
+    # --- Calibrated Mode Parameters (Mode: 'calibrated', Tweak A & Tweak B) ---
+    enable_calibrated: bool = False
+    # Tweak A: The Relative / Scaled Concavity Threshold (Or slightly raising C4 threshold to 1.15 or 1.20 mm)
+    c4_concavity_depth_mm_threshold: float = 1.20  # Raised C4 depth threshold (default: 1.20 mm)
+    c4_concavity_ratio_threshold: float = 0.065   # Relative concavity ratio threshold: depth / inferior width >= 6.5%
+    c4_rule: str = "depth"  # "depth", "ratio", "both", or "either"
+    # Tweak B: Hierarchical Anatomical Rule (Concavity Order Guard)
+    concavity_order_guard: bool = True  # Suppress C4 notch unless C2 & C3 notches are confirmed
+
+    def __post_init__(self):
+        # Synchronize explicit flags with mode string
+        if self.enable_calibrated or self.mode == "calibrated":
+            self.mode = "calibrated"
+            self.enable_calibrated = True
+            self.enable_fuzzy_hysteresis = False
+        elif self.enable_fuzzy_hysteresis or self.mode == "fuzzy":
+            self.mode = "fuzzy"
+            self.enable_fuzzy_hysteresis = True
+            self.enable_calibrated = False
+        else:
+            self.mode = "standard"
+            self.enable_calibrated = False
+            self.enable_fuzzy_hysteresis = False
 
     # Backward compatibility aliases
     @property
@@ -265,13 +293,18 @@ def compute_fuzzy_shape(
 
 
 def calculate_concavity(
-    ip: Point, ic: Point, ia: Point, thresholds: CVMThresholds
+    ip: Point,
+    ic: Point,
+    ia: Point,
+    thresholds: CVMThresholds,
+    vertebra_id: Optional[str] = None,
 ) -> Tuple[float, float, bool]:
     """
     Calculates the concavity depth and ratio of a vertebra following Section 2.5.1.
     Using spatial calibration factor S = 0.375 mm/pixel:
         d_{c, k}^{mm} = d_{c, k} * S
-        C_k = 1 if d_{c, k}^{mm} >= 1.0 mm else 0
+        C_k = 1 if d_{c, k}^{mm} >= threshold else 0
+    Supports calibrated mode adjustments for C4 (Tweak A: 1.15-1.20mm or depth/width >= 6.5%).
     Returns: (depth_px, ratio, is_concave)
     """
     depth_px = perpendicular_distance(ic, ip, ia)
@@ -281,10 +314,27 @@ def calculate_concavity(
     s = thresholds.pixel_to_mm if thresholds.pixel_to_mm is not None else 0.375
     depth_mm = depth_px * s
 
-    if thresholds.use_absolute_depth:
-        is_concave = depth_mm >= thresholds.concavity_depth_mm_threshold
+    is_c4 = (vertebra_id is not None and vertebra_id.strip().upper() == "C4")
+    if is_c4 and (thresholds.mode == "calibrated" or thresholds.enable_calibrated):
+        # Tweak A: The Relative / Scaled Concavity Threshold (Or slightly raising C4 threshold)
+        depth_th = thresholds.c4_concavity_depth_mm_threshold
+        ratio_th = thresholds.c4_concavity_ratio_threshold
+        if thresholds.c4_rule == "ratio":
+            is_concave = ratio >= ratio_th
+        elif thresholds.c4_rule == "both":
+            is_concave = (depth_mm >= depth_th) and (ratio >= ratio_th)
+        elif thresholds.c4_rule == "either":
+            is_concave = (depth_mm >= depth_th) or (ratio >= ratio_th)
+        else:  # default "depth"
+            if thresholds.use_absolute_depth:
+                is_concave = depth_mm >= depth_th
+            else:
+                is_concave = ratio >= ratio_th
     else:
-        is_concave = ratio >= thresholds.concavity_ratio_threshold
+        if thresholds.use_absolute_depth:
+            is_concave = depth_mm >= thresholds.concavity_depth_mm_threshold
+        else:
+            is_concave = ratio >= thresholds.concavity_ratio_threshold
 
     return depth_px, ratio, is_concave
 
@@ -363,16 +413,26 @@ def classify_cvm_stage(
     input_data: CVMInput,
     thresholds: Optional[CVMThresholds] = None,
     enable_fuzzy_hysteresis: Optional[bool] = None,
+    enable_calibrated: Optional[bool] = None,
+    mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Classifies the Cervical Vertebral Maturation (CVM) stage (CS1-CS6) based on 13 landmarks
     following Section 2.5 and Table 2 of the manuscript.
+
+    Supports 3 modes:
+      - 'standard': Manuscript Section 2.5 flat 1.0mm concavity thresholds and exact/legacy rules.
+      - 'fuzzy': Hysteresis buffer (+/-0.15mm) & continuous fuzzy transition zones.
+      - 'calibrated': Calibrated mode with:
+          * Tweak A: C4 concavity depth threshold 1.20mm (or relative ratio >= 6.5%).
+          * Tweak B: Hierarchical anatomical rule (Concavity Order Guard: C4 suppressed unless C2/C3 confirmed).
     
     Args:
         input_data: CVMInput containing the landmark points for C2, C3, and C4.
         thresholds: Configuration parameters for CVM classification. If None, default thresholds are used.
-        enable_fuzzy_hysteresis: Optional override to enable or disable hysteresis buffer and fuzzy transition zone.
-            If None, uses thresholds.enable_fuzzy_hysteresis (default: False).
+        enable_fuzzy_hysteresis: Optional override to enable or disable fuzzy hysteresis mode.
+        enable_calibrated: Optional override to enable or disable calibrated mode.
+        mode: Optional mode override ('standard', 'fuzzy', or 'calibrated').
         
     Returns:
         A dictionary containing:
@@ -381,16 +441,38 @@ def classify_cvm_stage(
     """
     if thresholds is None:
         thresholds = CVMThresholds()
-    if enable_fuzzy_hysteresis is not None:
-        from dataclasses import replace
-        thresholds = replace(thresholds, enable_fuzzy_hysteresis=enable_fuzzy_hysteresis)
+
+    from dataclasses import replace
+    if mode is not None:
+        mode_clean = mode.lower().strip()
+        thresholds = replace(
+            thresholds,
+            mode=mode_clean,
+            enable_calibrated=(mode_clean == "calibrated"),
+            enable_fuzzy_hysteresis=(mode_clean == "fuzzy"),
+        )
+    elif enable_calibrated is not None:
+        thresholds = replace(
+            thresholds,
+            enable_calibrated=enable_calibrated,
+            mode="calibrated" if enable_calibrated else "standard",
+            enable_fuzzy_hysteresis=False if enable_calibrated else thresholds.enable_fuzzy_hysteresis,
+        )
+    elif enable_fuzzy_hysteresis is not None:
+        thresholds = replace(
+            thresholds,
+            enable_fuzzy_hysteresis=enable_fuzzy_hysteresis,
+            mode="fuzzy" if enable_fuzzy_hysteresis else "standard",
+            enable_calibrated=False if enable_fuzzy_hysteresis else thresholds.enable_calibrated,
+        )
 
     # 1. Evaluate C2 Concavity
     c2_depth, c2_ratio, c2_concave = calculate_concavity(
         input_data.c2.inferior_posterior,
         input_data.c2.inferior_concavity,
         input_data.c2.inferior_anterior,
-        thresholds
+        thresholds,
+        vertebra_id="C2",
     )
 
     # 2. Evaluate C3 Concavity & Shape
@@ -398,29 +480,31 @@ def classify_cvm_stage(
         input_data.c3.inferior_posterior,
         input_data.c3.inferior_concavity,
         input_data.c3.inferior_anterior,
-        thresholds
+        thresholds,
+        vertebra_id="C3",
     )
     c3_shape_metrics = calculate_shape(
         input_data.c3.superior_posterior,
         input_data.c3.superior_anterior,
         input_data.c3.inferior_posterior,
         input_data.c3.inferior_anterior,
-        thresholds
+        thresholds,
     )
 
-    # 3. Evaluate C4 Concavity & Shape
+    # 3. Evaluate C4 Concavity & Shape (applies Tweak A in calibrated mode)
     c4_depth, c4_ratio, c4_concave = calculate_concavity(
         input_data.c4.inferior_posterior,
         input_data.c4.inferior_concavity,
         input_data.c4.inferior_anterior,
-        thresholds
+        thresholds,
+        vertebra_id="C4",
     )
     c4_shape_metrics = calculate_shape(
         input_data.c4.superior_posterior,
         input_data.c4.superior_anterior,
         input_data.c4.inferior_posterior,
         input_data.c4.inferior_anterior,
-        thresholds
+        thresholds,
     )
 
     s = thresholds.pixel_to_mm if thresholds.pixel_to_mm is not None else 0.375
@@ -429,17 +513,25 @@ def classify_cvm_stage(
     c4_depth_mm = c4_depth * s
 
     th_depth = thresholds.concavity_depth_mm_threshold
-    hyst_mm = thresholds.concavity_hysteresis_mm if thresholds.enable_fuzzy_hysteresis else 0.0
+    hyst_mm = thresholds.concavity_hysteresis_mm if thresholds.mode == "fuzzy" else 0.0
 
     c2_fuzzy = compute_fuzzy_concavity(c2_depth_mm, th_depth, hyst_mm)
     c3_fuzzy = compute_fuzzy_concavity(c3_depth_mm, th_depth, hyst_mm)
-    c4_fuzzy = compute_fuzzy_concavity(c4_depth_mm, th_depth, hyst_mm)
+    c4_th_depth = (
+        thresholds.c4_concavity_depth_mm_threshold
+        if thresholds.mode == "calibrated"
+        else th_depth
+    )
+    c4_fuzzy = compute_fuzzy_concavity(c4_depth_mm, c4_th_depth, hyst_mm)
 
     shape3 = c3_shape_metrics["shape"]
     shape4 = c4_shape_metrics["shape"]
 
-    # --- Notch Resolution (with Hysteresis & Biological Hierarchy) ---
-    if thresholds.enable_fuzzy_hysteresis:
+    c4_notch_suppressed = False
+    c3_notch_suppressed = False
+
+    # --- Notch Resolution for the 3 Modes ---
+    if thresholds.mode == "fuzzy":
         # 1. C2 notch resolution:
         if c2_depth_mm >= th_depth + hyst_mm:
             n2 = 1
@@ -451,13 +543,12 @@ def classify_cvm_stage(
         # 2. C3 notch resolution: requires prior C2 maturity (monotonicity)
         if thresholds.strict_biological_hierarchy and n2 == 0:
             n3 = 0
+            c3_notch_suppressed = bool(c3_concave)
         elif c3_depth_mm >= th_depth + hyst_mm:
             n3 = 1
         elif c3_depth_mm < th_depth - hyst_mm:
             n3 = 0
         else:
-            # Transition zone [th - margin, th + margin]
-            # Ambiguous concavity requires shape maturation to confirm notch presence
             if shape3 != "Trapezoidal" and c3_depth_mm >= th_depth:
                 n3 = 1
             else:
@@ -466,22 +557,45 @@ def classify_cvm_stage(
         # 3. C4 notch resolution: requires prior C3 maturity (monotonicity)
         if thresholds.strict_biological_hierarchy and n3 == 0:
             n4 = 0
+            c4_notch_suppressed = bool(c4_concave)
         elif c4_depth_mm >= th_depth + hyst_mm:
             n4 = 1
         elif c4_depth_mm < th_depth - hyst_mm:
             n4 = 0
         else:
-            # Transition zone [th - margin, th + margin]
             if shape4 != "Trapezoidal" and c4_depth_mm >= th_depth:
                 n4 = 1
             else:
                 n4 = 0
-    else:
+
+    elif thresholds.mode == "calibrated":
+        # Mode: 'calibrated'
+        # Tweak A: C4 concavity depth & ratio thresholds already applied to c4_concave.
         n2 = 1 if c2_concave else 0
         n3 = 1 if c3_concave else 0
         n4 = 1 if c4_concave else 0
 
-    # 1. Check exact match with Table 2
+        # Tweak B: Hierarchical Anatomical Rule (Concavity Order Guard)
+        # In real human biology and Baccetti's anatomical progression:
+        # Concavity forms on C2 first (CS2), then on C3 (CS3), then on C4 (CS4).
+        # A patient almost never develops a deep notch on C4 while C3 or C2 remains flat!
+        # If C4 notch is detected, but C2 or C3 notch is absent, it is an anatomical artifact
+        # -> suppress C4 notch unless C2/C3 are confirmed.
+        if thresholds.concavity_order_guard or thresholds.strict_biological_hierarchy:
+            if n4 == 1 and (n2 == 0 or n3 == 0):
+                n4 = 0
+                c4_notch_suppressed = True
+            if n3 == 1 and n2 == 0:
+                n3 = 0
+                c3_notch_suppressed = True
+
+    else:
+        # Mode: 'standard' (exact Section 2.5 baseline)
+        n2 = 1 if c2_concave else 0
+        n3 = 1 if c3_concave else 0
+        n4 = 1 if c4_concave else 0
+
+    # 1. Check exact match with Table 2 ground truth diagnostic rules
     exact_stage = None
     for rule in TABLE_2_RULES:
         if (
@@ -496,8 +610,58 @@ def classify_cvm_stage(
 
     if exact_stage is not None:
         stage = exact_stage
-    elif not thresholds.enable_fuzzy_hysteresis:
-        # Legacy fallback logic for exact backward compatibility
+    elif thresholds.mode == "fuzzy":
+        # Robust clinical hierarchical fallback with hysteresis & biological hierarchy
+        if shape3 == "Rectangular Vertical" or shape4 == "Rectangular Vertical":
+            stage = "CS6"
+        elif shape3 == "Square" or shape4 == "Square":
+            stage = "CS5"
+        elif n2 == 1 and n3 == 1 and n4 == 1:
+            stage = "CS4"
+        elif n2 == 1 and n3 == 1:
+            stage = "CS3"
+        elif n2 == 1:
+            stage = "CS2"
+        else:
+            stage = "CS1"
+    elif thresholds.mode == "calibrated":
+        # Calibrated clinical hierarchical fallback using calibrated effective notches (n2, n3, n4)
+        if n2 == 1 and n3 == 1 and n4 == 1:
+            if shape3 == "Rectangular Vertical" or shape4 == "Rectangular Vertical":
+                stage = "CS6"
+            elif shape3 == "Square" or shape4 == "Square":
+                stage = "CS5"
+            else:
+                stage = "CS4"
+        elif n2 == 1 and n3 == 1:
+            if shape3 == "Rectangular Vertical" or shape4 == "Rectangular Vertical":
+                stage = "CS6"
+            elif shape3 == "Square" or shape4 == "Square":
+                stage = "CS5"
+            else:
+                stage = "CS3"
+        elif n2 == 1:
+            if shape3 == "Rectangular Vertical" or shape4 == "Rectangular Vertical":
+                stage = "CS6"
+            elif shape3 == "Square" or shape4 == "Square":
+                stage = "CS5"
+            elif shape3 == "Rectangular Horizontal" and shape4 == "Rectangular Horizontal":
+                stage = "CS4"
+            elif shape3 == "Rectangular Horizontal":
+                stage = "CS3"
+            else:
+                stage = "CS2"
+        else:
+            if shape3 == "Rectangular Vertical" or shape4 == "Rectangular Vertical":
+                stage = "CS6"
+            elif shape3 == "Square" or shape4 == "Square":
+                stage = "CS5"
+            elif shape3 == "Rectangular Horizontal":
+                stage = "CS3"
+            else:
+                stage = "CS1"
+    else:
+        # Standard legacy fallback logic for exact backward compatibility
         if c2_concave and c3_concave and c4_concave:
             if shape3 == "Rectangular Vertical" or shape4 == "Rectangular Vertical":
                 stage = "CS6"
@@ -536,34 +700,29 @@ def classify_cvm_stage(
                 stage = "CS3"
             else:
                 stage = "CS1"
-    else:
-        # Robust clinical hierarchical fallback with hysteresis & biological hierarchy
-        # Mature adult vertebral shapes (CS5/CS6)
-        if shape3 == "Rectangular Vertical" or shape4 == "Rectangular Vertical":
-            stage = "CS6"
-        elif shape3 == "Square" or shape4 == "Square":
-            stage = "CS5"
-        elif n2 == 1 and n3 == 1 and n4 == 1:
-            stage = "CS4"
-        elif n2 == 1 and n3 == 1:
-            stage = "CS3"
-        elif n2 == 1:
-            stage = "CS2"
-        else:
-            stage = "CS1"
 
     details = {
+        "mode": thresholds.mode,
         "spatial_calibration_mm_per_px": s,
         "concavity_threshold_mm": thresholds.concavity_depth_mm_threshold,
-        "fuzzy_hysteresis_enabled": thresholds.enable_fuzzy_hysteresis,
-        "concavity_hysteresis_mm": thresholds.concavity_hysteresis_mm if thresholds.enable_fuzzy_hysteresis else 0.0,
+        "c4_concavity_threshold_mm": (
+            thresholds.c4_concavity_depth_mm_threshold
+            if thresholds.mode == "calibrated"
+            else thresholds.concavity_depth_mm_threshold
+        ),
+        "c4_concavity_ratio_threshold": thresholds.c4_concavity_ratio_threshold,
+        "fuzzy_hysteresis_enabled": bool(thresholds.mode == "fuzzy"),
+        "calibrated_enabled": bool(thresholds.mode == "calibrated"),
+        "concavity_hysteresis_mm": thresholds.concavity_hysteresis_mm if thresholds.mode == "fuzzy" else 0.0,
         "effective_notches": {"C2": n2, "C3": n3, "C4": n4},
+        "c4_notch_suppressed_by_order_guard": c4_notch_suppressed,
+        "c3_notch_suppressed_by_order_guard": c3_notch_suppressed,
         "C2": {
             "concavity_depth": c2_depth,
             "concavity_depth_px": c2_depth,
             "concavity_depth_mm": c2_depth_mm,
             "concavity_ratio": c2_ratio,
-            "is_concave": bool(n2 == 1 if thresholds.enable_fuzzy_hysteresis else c2_concave),
+            "is_concave": bool(n2 == 1 if thresholds.mode in ("fuzzy", "calibrated") else c2_concave),
             "raw_is_concave": c2_concave,
             "notch": n2,
             "fuzzy": c2_fuzzy,
@@ -573,7 +732,7 @@ def classify_cvm_stage(
             "concavity_depth_px": c3_depth,
             "concavity_depth_mm": c3_depth_mm,
             "concavity_ratio": c3_ratio,
-            "is_concave": bool(n3 == 1 if thresholds.enable_fuzzy_hysteresis else c3_concave),
+            "is_concave": bool(n3 == 1 if thresholds.mode in ("fuzzy", "calibrated") else c3_concave),
             "raw_is_concave": c3_concave,
             "notch": n3,
             "shape_metrics": c3_shape_metrics,
@@ -584,7 +743,7 @@ def classify_cvm_stage(
             "concavity_depth_px": c4_depth,
             "concavity_depth_mm": c4_depth_mm,
             "concavity_ratio": c4_ratio,
-            "is_concave": bool(n4 == 1 if thresholds.enable_fuzzy_hysteresis else c4_concave),
+            "is_concave": bool(n4 == 1 if thresholds.mode in ("fuzzy", "calibrated") else c4_concave),
             "raw_is_concave": c4_concave,
             "notch": n4,
             "shape_metrics": c4_shape_metrics,
@@ -597,3 +756,280 @@ def classify_cvm_stage(
         "stage": stage,
         "details": details,
     }
+
+
+# --- CLI Interface for Standalone Execution ---
+
+def build_calculator_arg_parser():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Cervical Vertebral Maturation (CVM) Calculator (Modes: standard, fuzzy, calibrated)"
+    )
+    # Mode selection (3 modes: standard - fuzzy - calibrated)
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="standard",
+        choices=["standard", "fuzzy", "calibrated"],
+        help="CVM calculator mode: 'standard', 'fuzzy', or 'calibrated' (default: standard).",
+    )
+    parser.add_argument(
+        "--calibrated",
+        action="store_true",
+        help="Enable calibrated mode (Tweak A: C4 threshold 1.20mm/6.5%% + Tweak B: concavity order guard).",
+    )
+    parser.add_argument(
+        "--fuzzy",
+        "--enable-fuzzy-hysteresis",
+        action="store_true",
+        dest="fuzzy",
+        help="Enable fuzzy hysteresis mode with transition buffer.",
+    )
+    parser.add_argument(
+        "--standard",
+        action="store_true",
+        help="Enable standard manuscript mode (flat 1.0mm, default).",
+    )
+    # Calibrated parameters
+    parser.add_argument(
+        "--c4-concavity-threshold-mm",
+        "--c4-depth-th",
+        type=float,
+        default=1.20,
+        dest="c4_concavity_depth_mm_threshold",
+        help="C4 concavity depth threshold in mm for calibrated mode (default: 1.20 mm).",
+    )
+    parser.add_argument(
+        "--c4-concavity-ratio",
+        "--c4-ratio-th",
+        type=float,
+        default=0.065,
+        dest="c4_concavity_ratio_threshold",
+        help="C4 concavity relative ratio threshold for calibrated mode (default: 0.065 = 6.5%%).",
+    )
+    parser.add_argument(
+        "--c4-rule",
+        type=str,
+        default="depth",
+        choices=["depth", "ratio", "both", "either"],
+        help="C4 threshold rule in calibrated mode: 'depth' (default, depth>=1.2mm), 'ratio' (ratio>=6.5%%), 'both', or 'either'.",
+    )
+    # General threshold parameters
+    parser.add_argument(
+        "--pixel-to-mm",
+        type=float,
+        default=0.375,
+        help="Spatial calibration factor S in mm/pixel (default: 0.375).",
+    )
+    parser.add_argument(
+        "--concavity-threshold-mm",
+        type=float,
+        default=1.0,
+        help="General concavity depth threshold in mm for C2/C3 (default: 1.0 mm).",
+    )
+    # Input options
+    parser.add_argument(
+        "--landmarks-json",
+        "-l",
+        type=str,
+        default=None,
+        help="Path to JSON file or raw JSON string containing 13 landmark coordinates.",
+    )
+    parser.add_argument(
+        "--eval-predictions",
+        type=str,
+        default=None,
+        help="Path to predicted landmarks JSON file (e.g. predicted_landmarks.json) to evaluate all items.",
+    )
+    parser.add_argument(
+        "--ground-truth",
+        type=str,
+        default=None,
+        help="Optional path to ground truth stages text file (e.g. run1_gt_standard.txt) for accuracy metrics.",
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        type=str,
+        default=None,
+        help="Optional file path to save output stages or results.",
+    )
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="Run synthetic demo cases for CS1-CS6 in the selected mode.",
+    )
+    return parser
+
+
+def run_demo(thresholds: CVMThresholds):
+    print("=" * 70)
+    print(f"   CVM CALCULATOR DEMO - MODE: {thresholds.mode.upper()}")
+    print("=" * 70)
+    print(f"Calibration S:             {thresholds.pixel_to_mm} mm/px")
+    print(f"General Concavity Thresh: {thresholds.concavity_depth_mm_threshold} mm")
+    if thresholds.mode == "calibrated":
+        print(f"C4 Concavity Depth Thresh:{thresholds.c4_concavity_depth_mm_threshold} mm (Tweak A)")
+        print(f"C4 Concavity Ratio Thresh:{thresholds.c4_concavity_ratio_threshold * 100:.1f}% (Tweak A)")
+        print(f"Concavity Order Guard:    {thresholds.concavity_order_guard} (Tweak B)")
+    elif thresholds.mode == "fuzzy":
+        print(f"Hysteresis Buffer:        +/-{thresholds.concavity_hysteresis_mm} mm")
+        print(f"Strict Hierarchy:         {thresholds.strict_biological_hierarchy}")
+
+    # Synthetic demo cases
+    cases = [
+        ("CS1 Case (All Flat, Trapezoidal)", 0.2, 0.2, 0.2, 5.0, 5.0),
+        ("CS2 Case (C2 Concave only, Trapezoidal)", 3.5, 0.2, 0.2, 5.0, 5.0),
+        ("CS3 Case (C2 & C3 Concave, Rect Horizontal)", 3.5, 3.5, 0.2, 8.0, 5.0),
+        ("CS4 Case (All Concave, Rect Horizontal)", 3.5, 3.5, 3.5, 8.0, 8.0),
+        ("CS5 Case (All Concave, Square)", 3.5, 3.5, 3.5, 10.0, 10.0),
+        ("CS6 Case (All Concave, Rect Vertical)", 3.5, 3.5, 3.5, 13.0, 13.0),
+    ]
+    print("\nEvaluating synthetic stages:")
+    for desc, d2, d3, d4, h3, h4 in cases:
+        ip = Point(0, 0)
+        ia = Point(10, 0)
+        c2 = VertebraC2(ip, Point(5, d2), ia)
+        c3 = VertebraC3C4(ip, Point(5, d3), ia, Point(0, h3), Point(10, h3))
+        c4 = VertebraC3C4(ip, Point(5, d4), ia, Point(0, h4), Point(10, h4))
+        res = classify_cvm_stage(CVMInput(c2, c3, c4), thresholds=thresholds)
+        print(f"  * {desc:45s} -> Predicted: {res['stage']} (Exact Table 2: {res['details']['table_2_exact_match']})")
+    print("=" * 70)
+
+
+def main():
+    import json
+    import os
+    import sys
+    from collections import Counter
+    from pathlib import Path
+
+    parser = build_calculator_arg_parser()
+    args = parser.parse_args()
+
+    # Resolve mode
+    mode = args.mode
+    if args.calibrated:
+        mode = "calibrated"
+    elif args.fuzzy:
+        mode = "fuzzy"
+    elif args.standard:
+        mode = "standard"
+
+    thresholds = CVMThresholds(
+        mode=mode,
+        pixel_to_mm=args.pixel_to_mm,
+        concavity_depth_mm_threshold=args.concavity_threshold_mm,
+        c4_concavity_depth_mm_threshold=args.c4_concavity_depth_mm_threshold,
+        c4_concavity_ratio_threshold=args.c4_concavity_ratio_threshold,
+        c4_rule=args.c4_rule,
+        enable_calibrated=(mode == "calibrated"),
+        enable_fuzzy_hysteresis=(mode == "fuzzy"),
+    )
+
+    if args.demo or (len(sys.argv) == 1 and not args.landmarks_json and not args.eval_predictions):
+        run_demo(thresholds)
+        return
+
+    # Evaluation on a predictions JSON file
+    if args.eval_predictions:
+        pred_path = Path(args.eval_predictions)
+        if not pred_path.is_file():
+            print(f"Error: Predictions file not found: {pred_path}", file=sys.stderr)
+            sys.exit(1)
+        with open(pred_path, "r", encoding="utf-8") as f:
+            preds_dict = json.load(f)
+
+        print("=" * 70)
+        print(f"   CVM BATCH EVALUATION - MODE: {mode.upper()}")
+        print(f"   Source: {pred_path} ({len(preds_dict)} items)")
+        print("=" * 70)
+
+        gt_stages = None
+        if args.ground_truth:
+            gt_path = Path(args.ground_truth)
+            if gt_path.is_file():
+                with open(gt_path, "r", encoding="utf-8") as f:
+                    gt_stages = [int(line.strip().replace("CS", "")) for line in f if line.strip()]
+
+        counts = Counter()
+        stages_output = []
+        c4_suppressed_count = 0
+        c3_suppressed_count = 0
+
+        for idx, (img_name, pts) in enumerate(preds_dict.items()):
+            c2 = VertebraC2(
+                inferior_posterior=Point.from_dict(pts["C2_PI"]),
+                inferior_concavity=Point.from_dict(pts["C2_IC"]),
+                inferior_anterior=Point.from_dict(pts["C2_AI"]),
+            )
+            c3 = VertebraC3C4(
+                superior_posterior=Point.from_dict(pts["C3_PS"]),
+                superior_anterior=Point.from_dict(pts["C3_AS"]),
+                inferior_posterior=Point.from_dict(pts["C3_PI"]),
+                inferior_concavity=Point.from_dict(pts["C3_IC"]),
+                inferior_anterior=Point.from_dict(pts["C3_AI"]),
+            )
+            c4 = VertebraC3C4(
+                superior_posterior=Point.from_dict(pts["C4_PS"]),
+                superior_anterior=Point.from_dict(pts["C4_AS"]),
+                inferior_posterior=Point.from_dict(pts["C4_PI"]),
+                inferior_concavity=Point.from_dict(pts["C4_IC"]),
+                inferior_anterior=Point.from_dict(pts["C4_AI"]),
+            )
+            res = classify_cvm_stage(CVMInput(c2, c3, c4), thresholds=thresholds)
+            st_int = int(res["stage"].replace("CS", ""))
+            counts[st_int] += 1
+            stages_output.append(st_int)
+
+            if res["details"].get("c4_notch_suppressed_by_order_guard"):
+                c4_suppressed_count += 1
+            if res["details"].get("c3_notch_suppressed_by_order_guard"):
+                c3_suppressed_count += 1
+
+        total = sum(counts.values())
+        print(f"\nStage Distribution (Mode: {mode.upper()}):")
+        for s_idx in range(1, 7):
+            cnt = counts.get(s_idx, 0)
+            pct = (cnt / total * 100) if total > 0 else 0
+            bar = "█" * int(round(pct / 2.5))
+            print(f"  CS{s_idx}: {cnt:4d} ({pct:5.1f}%)  {bar}")
+        print(f"  Total: {total}")
+
+        if mode == "calibrated":
+            print(f"\n[Calibrated Mode Diagnostics]")
+            print(f"  * C4 false notches suppressed by Anatomical Order Guard: {c4_suppressed_count}")
+            print(f"  * C3 false notches suppressed by Anatomical Order Guard: {c3_suppressed_count}")
+
+        if gt_stages and len(gt_stages) == len(stages_output):
+            matches = sum(1 for p, g in zip(stages_output, gt_stages) if p == g)
+            acc = matches / len(gt_stages) * 100
+            print(f"\nAccuracy vs Ground Truth ({len(gt_stages)} items):")
+            print(f"  Exact Match: {matches}/{len(gt_stages)} ({acc:.2f}%)")
+
+        if args.output:
+            out_p = Path(args.output)
+            out_p.parent.mkdir(parents=True, exist_ok=True)
+            with open(out_p, "w", encoding="utf-8") as f:
+                for st in stages_output:
+                    f.write(f"{st}\n")
+            print(f"\nSaved stage results to: {out_p}")
+        return
+
+    # Single landmark json input
+    if args.landmarks_json:
+        raw_text = args.landmarks_json.strip()
+        if os.path.exists(raw_text):
+            with open(raw_text, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        else:
+            data = json.loads(raw_text)
+
+        cvm_input = CVMInput.from_dict(data)
+        result = classify_cvm_stage(cvm_input, thresholds=thresholds)
+        print(json.dumps(result, indent=2))
+        return
+
+
+if __name__ == "__main__":
+    main()
